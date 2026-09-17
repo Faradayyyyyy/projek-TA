@@ -540,12 +540,17 @@ Route::post('/api/cctv/upload-frame', function (\Illuminate\Http\Request $reques
 
 // 3. Endpoint Polling Perintah Hardware untuk Edge Gateway (Laptop)
 Route::get('/api/hardware/poll', function () {
+    $pending = Cache::pull('pending_hardware_queue', []);
+
     $queueFile = storage_path('app/hardware_queue.json');
-    $pending = [];
     if (file_exists($queueFile)) {
-        $pending = json_decode(file_get_contents($queueFile), true) ?: [];
-        file_put_contents($queueFile, json_encode([]));
+        $fileCommands = json_decode(file_get_contents($queueFile), true) ?: [];
+        if (!empty($fileCommands)) {
+            $pending = array_merge($pending, $fileCommands);
+            file_put_contents($queueFile, json_encode([]));
+        }
     }
+
     return response()->json([
         'status' => 'success',
         'count' => count($pending),

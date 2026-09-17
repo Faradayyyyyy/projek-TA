@@ -89,6 +89,7 @@ def send_soap(action, body_inner):
         return 500, str(e)
 
 def move_tapo(direction):
+    load_config()
     x = 0.0
     y = 0.0
     z = 0.0
