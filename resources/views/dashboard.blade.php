@@ -206,11 +206,33 @@
                                         </div>
                                     </div>
                                 </div>
-                                <p id="cctv-active-subtitle" class="text-[11px] text-slate-400 font-mono mt-0.5">Tapo C200 &bull; IP: 10.32.72.46</p>
+                                <p id="cctv-active-subtitle" class="text-[11px] text-slate-400 font-mono mt-0.5">Tapo C200 &bull; IP: 10.32.72.78</p>
                             </div>
                         </div>
                         
-                        <div class="flex items-center gap-2.5 flex-wrap">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <!-- Switcher Mode Siaran (LAN Direct vs Web Proxy Luar Jaringan) -->
+                            <div class="inline-flex rounded-xl bg-slate-950/80 p-0.5 border border-white/10 font-mono text-[11px] shadow-inner">
+                                <button type="button" id="btn-mode-direct" onclick="setStreamMode('direct')" 
+                                        class="px-2.5 py-1 rounded-lg font-bold transition-all bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm" 
+                                        title="Koneksi Langsung Port 8090 (Cocok untuk LAN / Host Server)">
+                                    LAN Direct
+                                </button>
+                                <button type="button" id="btn-mode-proxy" onclick="setStreamMode('proxy')" 
+                                        class="px-2.5 py-1 rounded-lg text-slate-400 hover:text-slate-200 transition-all" 
+                                        title="Stream Lewat Web Server (Bisa diakses dari jaringan luar & mobile tanpa port 8090)">
+                                    Web Proxy
+                                </button>
+                            </div>
+
+                            <!-- Tombol Akses Cloud WebRTC Resmi (Lisensi Agent DVR) -->
+                            <button type="button" onclick="openCloudRemoteModal()" 
+                                    class="px-3 py-1.5 bg-gradient-to-r from-amber-500/20 to-violet-500/20 hover:from-amber-500/30 hover:to-violet-500/30 border border-amber-500/40 hover:border-amber-400 text-amber-300 font-bold rounded-xl text-xs font-mono flex items-center gap-1.5 transition-all active:scale-95 shadow-[0_0_15px_rgba(245,158,11,0.2)]"
+                                    title="Akses Jarak Jauh Cloud WebRTC Resmi (Lisensi Agent DVR Terdaftar)">
+                                <i data-lucide="shield-check" class="w-4 h-4 text-amber-400"></i>
+                                <span>Cloud WebRTC</span>
+                            </button>
+
                             <!-- Live Streaming Status Badge -->
                             <div id="cctv-status-badge" class="px-3 py-1.5 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs font-bold text-rose-400 flex items-center gap-2 shadow-[0_0_10px_rgba(244,63,94,0.1)] font-mono">
                                 <div id="cctv-status-dot" class="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></div>
@@ -241,13 +263,13 @@
                         </div>
                     </div>
 
-                    <!-- Video Frame (100% Full Pure Live Feed - Hanya Kamera 4 Saja) -->
+                    <!-- Video Frame (100% Full Pure Live Feed) -->
                     <div id="cctv-container" class="relative w-full aspect-video bg-black rounded-xl overflow-hidden border border-cyan-500/30 shadow-2xl flex items-center justify-center">
                         <img id="real-agentdvr-stream"
-                             src="http://localhost:8090/video.mjpg?oid=4" 
+                             src="" 
                              class="w-full h-full object-cover transition-opacity duration-300"
-                             alt="Live CCTV Kamera 4"
-                             onerror="if (!this.dataset.fallback) { this.dataset.fallback = 'true'; this.src = '/api/cctv-stream'; }">
+                             alt="Live CCTV Feed"
+                             onerror="handleStreamError()">
 
                         <!-- Standby / Privacy Overlay saat Kamera Dimatikan (OFF) -->
                         <div id="cctv-off-overlay" class="absolute inset-0 bg-slate-950/95 backdrop-blur-md hidden flex-col items-center justify-center gap-3.5 p-6 text-center z-20">
@@ -731,6 +753,89 @@
         </div>
     </div>
 
+    <!-- ========================================================================= -->
+    <!-- MODAL 3: AKSES CLOUD JARAK JAUH LISENSI RESMI AGENT DVR (WEBRTC)         -->
+    <!-- ========================================================================= -->
+    <div id="modal-cloud-remote" class="fixed inset-0 bg-black/85 backdrop-blur-md z-50 hidden flex items-center justify-center p-4 transition-all animate-fade-in">
+        <div class="glass-panel w-full max-w-xl rounded-3xl p-6 sm:p-8 border border-amber-500/40 shadow-[0_0_50px_rgba(245,158,11,0.25)] relative space-y-6 max-h-[90vh] overflow-y-auto">
+            
+            <!-- Modal Header -->
+            <div class="flex items-center justify-between border-b border-white/10 pb-4">
+                <div class="flex items-center gap-3">
+                    <div class="p-3 bg-gradient-to-br from-amber-500/20 to-violet-500/20 text-amber-400 rounded-2xl border border-amber-500/30 shadow-inner">
+                        <i data-lucide="shield-check" class="w-6 h-6 text-amber-400"></i>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <h3 class="text-lg font-bold text-white leading-tight">Akses Jarak Jauh Cloud WebRTC</h3>
+                            <span class="px-2 py-0.5 bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-mono font-bold rounded-full">LISENSI RESMI AKTIF</span>
+                        </div>
+                        <p class="text-xs text-slate-400 font-mono">Streaming CCTV langsung dari luar jaringan tanpa Ngrok / Cloudflare Tunnel</p>
+                    </div>
+                </div>
+                <button type="button" onclick="closeCloudRemoteModal()" class="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-white/5 transition-all">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+
+            <!-- Detail Info Lisensi -->
+            <div class="space-y-4">
+                <div class="p-4 bg-slate-900/80 rounded-2xl border border-white/10 space-y-3 font-mono text-xs">
+                    <div class="flex items-center justify-between py-1 border-b border-white/5">
+                        <span class="text-slate-400">Akun Lisensi Resmi:</span>
+                        <span class="text-amber-300 font-bold">siwyviggo@gmail.com</span>
+                    </div>
+                    <div class="flex items-center justify-between py-1 border-b border-white/5">
+                        <span class="text-slate-400">Nama Server Agent DVR:</span>
+                        <span class="text-cyan-300 font-bold">VIGGOFARADAY</span>
+                    </div>
+                    <div class="flex items-center justify-between py-1 border-b border-white/5">
+                        <span class="text-slate-400">Server Unique ID:</span>
+                        <span class="text-slate-300 text-[11px]">daf0a74b-2215-44e3-a25d-1e66629d5dfa</span>
+                    </div>
+                    <div class="flex items-center justify-between py-1 border-b border-white/5">
+                        <span class="text-slate-400">Protokol Akses:</span>
+                        <span class="text-emerald-400 font-bold">WebRTC P2P + TURN/STUN Cloud Relay</span>
+                    </div>
+                    <div class="flex items-center justify-between py-1">
+                        <span class="text-slate-400">Status Server Cloud:</span>
+                        <span class="text-emerald-400 font-bold flex items-center gap-1.5">
+                            <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> TERHUBUNG (ONLINE)
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Card Penjelasan -->
+                <div class="p-4 bg-cyan-950/30 rounded-2xl border border-cyan-500/20 text-xs text-slate-300 space-y-2">
+                    <div class="flex items-center gap-2 text-cyan-400 font-bold font-mono">
+                        <i data-lucide="info" class="w-4 h-4"></i>
+                        <span>Bagaimana Cara Akses dari Jaringan Luar?</span>
+                    </div>
+                    <p class="leading-relaxed text-slate-300">
+                        1. <strong class="text-white">Di Web Dashboard Ini:</strong> Cukup pilih mode <span class="text-cyan-300 font-mono font-bold">Web Proxy</span> di atas layar CCTV. Video feed akan dialirkan langsung melalui server web (port 8000), sehingga Anda dapat melihat kamera dari ponsel atau laptop lain di luar jaringan tanpa setting port tambahan!
+                    </p>
+                    <p class="leading-relaxed text-slate-300">
+                        2. <strong class="text-white">Portal WebRTC Cloud Resmi:</strong> Anda juga dapat membuka portal resmi Agent DVR (iSpyConnect) dengan enkripsi WebRTC berkecepatan tinggi di perangkat mana saja di dunia secara instan.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Modal Footer -->
+            <div class="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-white/10">
+                <button type="button" onclick="openCloudRemoteUrl()" 
+                        class="w-full sm:w-auto px-5 py-3 bg-gradient-to-r from-amber-500 to-violet-600 hover:from-amber-400 hover:to-violet-500 text-white font-bold rounded-xl text-xs font-mono flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(245,158,11,0.4)] transition-all active:scale-95">
+                    <i data-lucide="external-link" class="w-4 h-4"></i>
+                    Buka Portal Cloud WebRTC Resmi
+                </button>
+                <button type="button" onclick="closeCloudRemoteModal()" 
+                        class="w-full sm:w-auto px-5 py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl text-xs font-mono transition-all">
+                    Tutup
+                </button>
+            </div>
+
+        </div>
+    </div>
+
     <!-- JavaScript Interaktif -->
     <script>
         lucide.createIcons();
@@ -974,11 +1079,152 @@
         });
 
         // =========================================================================
-        // LOGIKA KONTROL ON / OFF KAMERA CCTV (SINKRON LANGSUNG DENGAN AGENT DVR)
+        // MANAJEMEN STREAMING CCTV (DIRECT LAN, WEB PROXY & CLOUD WEBRTC LISENSI)
         // =========================================================================
         let isCameraPowerOn = true;
-        const CCTV_STREAM_URL = "http://localhost:8090/video.mjpg?oid=4";
+        const isLocalClient = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+        let currentStreamMode = localStorage.getItem('cctv_stream_mode') || (isLocalClient ? 'direct' : 'proxy');
+        let snapshotLoopActive = false;
+        let snapshotTimeout = null;
 
+        function getActiveOid() {
+            if (currentActiveCctv && currentActiveCctv.oid) {
+                return currentActiveCctv.oid;
+            }
+            return 4;
+        }
+
+        function getDirectStreamUrl(oid = null) {
+            const targetOid = oid !== null ? oid : getActiveOid();
+            const host = window.location.hostname || 'localhost';
+            return `http://${host}:8090/video.mjpg?oid=${targetOid}`;
+        }
+
+        function startProxyStream(oid = null) {
+            stopProxyStream();
+            if (!isCameraPowerOn) return;
+
+            snapshotLoopActive = true;
+            const targetOid = oid !== null ? oid : getActiveOid();
+            const img = document.getElementById('real-agentdvr-stream');
+            if (!img) return;
+
+            function loadNextSnapshot() {
+                if (!snapshotLoopActive || !isCameraPowerOn) return;
+                const buffer = new Image();
+                buffer.onload = () => {
+                    if (!snapshotLoopActive || !isCameraPowerOn) return;
+                    img.src = buffer.src;
+                    img.classList.remove('opacity-0');
+                    snapshotTimeout = setTimeout(loadNextSnapshot, 90); // ~11 FPS smooth
+                };
+                buffer.onerror = () => {
+                    if (!snapshotLoopActive || !isCameraPowerOn) return;
+                    snapshotTimeout = setTimeout(loadNextSnapshot, 1500);
+                };
+                buffer.src = `/api/cctv-snapshot?oid=${targetOid}&t=${Date.now()}`;
+            }
+            loadNextSnapshot();
+        }
+
+        function stopProxyStream() {
+            snapshotLoopActive = false;
+            if (snapshotTimeout) {
+                clearTimeout(snapshotTimeout);
+                snapshotTimeout = null;
+            }
+        }
+
+        function setStreamMode(mode, silent = false) {
+            currentStreamMode = mode;
+            localStorage.setItem('cctv_stream_mode', mode);
+
+            const btnDirect = document.getElementById('btn-mode-direct');
+            const btnProxy = document.getElementById('btn-mode-proxy');
+
+            if (mode === 'direct') {
+                if (btnDirect) {
+                    btnDirect.className = 'px-2.5 py-1 rounded-lg font-bold transition-all bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm';
+                }
+                if (btnProxy) {
+                    btnProxy.className = 'px-2.5 py-1 rounded-lg text-slate-400 hover:text-slate-200 transition-all';
+                }
+                stopProxyStream();
+                updateStreamDisplay();
+                if (!silent) showCctvToast("Mode Direct LAN (Port 8090) Aktif", "success");
+            } else {
+                if (btnDirect) {
+                    btnDirect.className = 'px-2.5 py-1 rounded-lg text-slate-400 hover:text-slate-200 transition-all';
+                }
+                if (btnProxy) {
+                    btnProxy.className = 'px-2.5 py-1 rounded-lg font-bold transition-all bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm';
+                }
+                updateStreamDisplay();
+                if (!silent) showCctvToast("Mode Web Proxy (Luar Jaringan) Aktif", "success");
+            }
+        }
+
+        function handleStreamError() {
+            if (!isCameraPowerOn) return;
+            // Jika koneksi langsung ke port 8090 gagal (misal diakses lewat HP / jaringan luar yang blokir 8090), otomatis alihkan ke Proxy
+            if (currentStreamMode === 'direct') {
+                console.warn("Direct stream port 8090 failed. Auto-switching to Web Proxy mode...");
+                setStreamMode('proxy', true);
+                showCctvToast("Port 8090 tidak terjangkau dari jaringan ini. Otomatis beralih ke Mode Web Proxy!", "info");
+            }
+        }
+
+        function updateStreamDisplay() {
+            const img = document.getElementById('real-agentdvr-stream');
+            if (!img) return;
+
+            if (!isCameraPowerOn) {
+                stopProxyStream();
+                img.src = '';
+                img.classList.add('opacity-0');
+                return;
+            }
+
+            const targetOid = getActiveOid();
+
+            if (currentStreamMode === 'direct') {
+                stopProxyStream();
+                img.src = getDirectStreamUrl(targetOid) + '&t=' + Date.now();
+                img.classList.remove('opacity-0');
+            } else {
+                startProxyStream(targetOid);
+            }
+        }
+
+        // =========================================================================
+        // MODAL AKSES JARAK JAUH CLOUD WEBRTC (LISENSI RESMI AGENT DVR)
+        // =========================================================================
+        function openCloudRemoteModal() {
+            const modal = document.getElementById('modal-cloud-remote');
+            if (modal) {
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+            }
+            if (typeof lucide !== 'undefined') lucide.createIcons();
+        }
+
+        function closeCloudRemoteModal() {
+            const modal = document.getElementById('modal-cloud-remote');
+            if (modal) {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }
+        }
+
+        function openCloudRemoteUrl() {
+            const activeOid = getActiveOid();
+            const url = `https://www.ispyconnect.com/app/?connect=daf0a74b-2215-44e3-a25d-1e66629d5dfa&oid=${activeOid}`;
+            window.open(url, '_blank', 'noopener,noreferrer');
+        }
+
+        // =========================================================================
+        // LOGIKA KONTROL ON / OFF KAMERA CCTV
+        // =========================================================================
         function toggleCameraPower(forceState = null) {
             if (forceState !== null) {
                 isCameraPowerOn = forceState;
@@ -987,13 +1233,10 @@
             }
 
             const cmd = isCameraPowerOn ? 'on' : 'off';
-            const agentCmd = isCameraPowerOn ? 'switchon' : 'switchoff';
+            const activeOid = getActiveOid();
 
-            // 1. Eksekusi Perintah Langsung ke Agent DVR (Kamera 4 / oid=4)
-            fetch(`http://localhost:8090/q.json?cmd=${agentCmd}&oid=4&ot=2`, { mode: 'no-cors' }).catch(() => {});
-
-            // 2. Sinkronisasi Aktivitas ke Backend Laravel & Database Log
-            fetch('/api/cctv-power/' + cmd).catch(() => {});
+            // Sinkronisasi Aktivitas ke Backend Laravel & Database Log (Server memanggil Agent DVR lokal secara aman)
+            fetch(`/api/cctv-power/${cmd}?oid=${activeOid}`).catch(() => {});
 
             const img = document.getElementById('real-agentdvr-stream');
             const overlay = document.getElementById('cctv-off-overlay');
@@ -1006,15 +1249,6 @@
             const iconBox = document.getElementById('cctv-icon-box');
 
             if (isCameraPowerOn) {
-                // STATE: ON
-                if (img) {
-                    setTimeout(() => {
-                        if (isCameraPowerOn && img) {
-                            img.src = CCTV_STREAM_URL + '&t=' + Date.now();
-                            img.classList.remove('opacity-0');
-                        }
-                    }, 250);
-                }
                 if (overlay) {
                     overlay.classList.add('hidden');
                     overlay.classList.remove('flex');
@@ -1030,8 +1264,10 @@
                 if (toggleText) toggleText.textContent = 'KAMERA ON';
                 if (toggleIcon) toggleIcon.className = 'w-4 h-4 text-cyan-400';
                 if (iconBox) iconBox.className = 'p-2.5 bg-cyan-500/20 text-cyan-400 rounded-xl border border-cyan-500/30';
+
+                updateStreamDisplay();
             } else {
-                // STATE: OFF (Standby)
+                stopProxyStream();
                 if (img) {
                     img.src = '';
                     img.classList.add('opacity-0');
@@ -1053,56 +1289,27 @@
                 if (iconBox) iconBox.className = 'p-2.5 bg-slate-800 text-slate-500 rounded-xl border border-white/5';
             }
 
-            // Notifikasi Toast
-            const toast = document.createElement('div');
-            toast.className = `fixed bottom-6 right-6 px-4 py-3 bg-slate-900/90 backdrop-blur-md border ${isCameraPowerOn ? 'border-cyan-500/50 text-cyan-300' : 'border-rose-500/50 text-rose-300'} rounded-xl text-xs font-mono font-bold shadow-2xl z-50 flex items-center gap-2`;
-            toast.innerHTML = `<i data-lucide="${isCameraPowerOn ? 'video' : 'video-off'}" class="w-4 h-4"></i> Agent DVR: Kamera 4 ${isCameraPowerOn ? 'Dinyalakan (ON) 🟢' : 'Dimatikan (OFF) 🔴'}`;
-            document.body.appendChild(toast);
-            if (typeof lucide !== 'undefined') lucide.createIcons();
-            setTimeout(() => toast.remove(), 2500);
+            showCctvToast(`Agent DVR: Kamera ${isCameraPowerOn ? 'Dinyalakan (ON)' : 'Dimatikan (OFF)'}`, isCameraPowerOn ? 'success' : 'info');
         }
 
-        // External PTZ Physical Camera Controller (Kamera 4 / ONVIF Driver)
+        // External PTZ Physical Camera Controller (ONVIF Driver & Agent DVR)
         function controlCctvPtz(command) {
             if (!isCameraPowerOn) {
-                const toast = document.createElement('div');
-                toast.className = 'fixed bottom-6 right-6 px-4 py-3 bg-rose-950/90 backdrop-blur-md border border-rose-500/50 text-rose-300 rounded-xl text-xs font-mono font-bold shadow-2xl z-50 flex items-center gap-2';
-                toast.innerHTML = `<i data-lucide="alert-triangle" class="w-4 h-4 text-rose-400"></i> Kamera Sedang OFF! Nyalakan kamera terlebih dahulu.`;
-                document.body.appendChild(toast);
-                if (typeof lucide !== 'undefined') lucide.createIcons();
-                setTimeout(() => toast.remove(), 2500);
+                showCctvToast("Kamera Sedang OFF! Nyalakan kamera terlebih dahulu.", "error");
                 return;
             }
 
-            const ispyMap = {
-                'up': 'ispydir_1',
-                'down': 'ispydir_7',
-                'left': 'ispydir_3',
-                'right': 'ispydir_5',
-                'home': 'ispydir_4'
-            };
-            const ispyCmd = ispyMap[command] || 'ispydir_4';
+            const activeOid = getActiveOid();
 
-            // 1. Eksekusi Driver ONVIF Python Langsung ke Kamera 4 Fisik (IP: 10.32.72.46)
-            fetch('/api/cctv-ptz/' + command).catch(() => {});
-
-            // 2. Kirim Perintah Putar Motor ke Agent DVR (Target ID: oid=4)
-            fetch(`http://localhost:8090/q.json?cmd=ptzCommand&command=${ispyCmd}&oid=4&ot=2`, { mode: 'no-cors' }).catch(() => {});
-            fetch(`http://localhost:8090/command/ptzDirection?dir=${command}&oid=4&ot=2`, { mode: 'no-cors' }).catch(() => {});
-            
-            // 3. Beri jeda 600ms lalu hentikan putaran agar kamera bergerak bertahap per klik
-            if (command !== 'home') {
-                setTimeout(() => {
-                    fetch('http://localhost:8090/q.json?cmd=ptzCommand&command=ispydir_4&oid=4&ot=2', { mode: 'no-cors' }).catch(() => {});
-                }, 600);
-            }
+            // Eksekusi Driver ONVIF Python Langsung & Agent DVR via backend Laravel
+            fetch(`/api/cctv-ptz/${command}?oid=${activeOid}`).catch(() => {});
 
             const labels = {
-                'up': 'Putar Atas ⬆️',
-                'down': 'Putar Bawah ⬇️',
-                'left': 'Putar Kiri ⬅️',
-                'right': 'Putar Kanan ➡️',
-                'home': 'Posisi Tengah (Reset) 🎯'
+                'up': 'Putar Atas',
+                'down': 'Putar Bawah',
+                'left': 'Putar Kiri',
+                'right': 'Putar Kanan',
+                'home': 'Posisi Tengah (Reset)'
             };
 
             const existingToast = document.getElementById('ptz-toast');
@@ -1110,8 +1317,8 @@
 
             const toast = document.createElement('div');
             toast.id = 'ptz-toast';
-            toast.className = 'fixed bottom-6 right-6 px-4 py-3 bg-slate-900/90 backdrop-blur-md border border-cyan-500/50 text-cyan-300 rounded-xl text-xs font-mono font-bold shadow-[0_0_25px_rgba(6,182,212,0.3)] z-50 flex items-center gap-2';
-            toast.innerHTML = `<i data-lucide="navigation" class="w-4 h-4 text-cyan-400"></i> PTZ Fisik: ${labels[command] || command}`;
+            toast.className = 'fixed bottom-6 right-6 px-4 py-3 bg-slate-900/90 backdrop-blur-md border border-cyan-500/50 text-cyan-300 rounded-xl text-xs font-mono font-bold shadow-[0_0_25px_rgba(6,182,212,0.3)] z-50 flex items-center gap-2 animate-fade-in';
+            toast.innerHTML = `<i data-lucide="navigation" class="w-4 h-4 text-cyan-400"></i> PTZ: ${labels[command] || command}`;
             document.body.appendChild(toast);
             if (typeof lucide !== 'undefined') lucide.createIcons();
 
@@ -1191,6 +1398,9 @@
                                 sub.innerHTML = `${currentActiveCctv.brand || 'IP Camera'} &bull; IP: <span class="text-cyan-400 font-bold">${currentActiveCctv.ip}</span> (Port ${currentActiveCctv.port || 2020})`;
                             }
                         }
+
+                        // Inisialisasi stream kamera aktif
+                        setStreamMode(currentStreamMode, true);
                     }
                 })
                 .catch(err => console.error("Error loading CCTV devices:", err));
@@ -1211,13 +1421,10 @@
                         }
 
                         // Update Live Stream Video Frame
-                        const img = document.getElementById('real-agentdvr-stream');
-                        if (img && isCameraPowerOn) {
-                            img.src = currentActiveCctv.stream_url + '&t=' + Date.now();
-                        }
+                        updateStreamDisplay();
 
                         // Tampilkan Notifikasi Toast
-                        showCctvToast(`Beralih ke Kamera: ${currentActiveCctv.name} 📹`, 'success');
+                        showCctvToast(`Beralih ke Kamera: ${currentActiveCctv.name}`, 'success');
                     }
                 })
                 .catch(err => {

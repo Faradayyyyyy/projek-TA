@@ -148,26 +148,88 @@ Route::get('/api/device-telemetry', function () {
     ]);
 });
 
-// API Endpoint Proxy Stream CCTV Agent DVR
+// API Endpoint Proxy Stream CCTV Agent DVR (Bisa diakses dari jaringan lokal maupun luar jaringan)
 Route::get('/api/cctv-stream', function () {
-    $urls = [
-        'http://127.0.0.1:8090/video.mjpg?oid=4',
-        'http://127.0.0.1:8090/video.mjpeg?oid=4',
-        'http://localhost:8090/video.mjpg?oid=4',
-    ];
+    $oid = request('oid', 4);
+    $url = "http://127.0.0.1:8090/video.mjpg?oid={$oid}";
 
-    foreach ($urls as $url) {
-        try {
-            $res = Illuminate\Support\Facades\Http::timeout(0.4)->get($url);
-            if ($res->successful()) {
-                return response($res->body(), 200)
-                    ->header('Content-Type', $res->header('Content-Type') ?: 'multipart/x-mixed-replace; boundary=frame');
+    // Tutup session agar tidak memblokir request lain selama streaming
+    if (function_exists('session_write_close')) {
+        @session_write_close();
+    }
+    @set_time_limit(0);
+
+    return response()->stream(function () use ($url) {
+        $ctx = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => 3,
+                'header' => "Connection: close\r\n"
+            ]
+        ]);
+        $fp = @fopen($url, 'rb', false, $ctx);
+        if ($fp) {
+            while (!feof($fp) && connection_status() == CONNECTION_NORMAL) {
+                $chunk = fread($fp, 8192);
+                if ($chunk === false || $chunk === '') {
+                    break;
+                }
+                echo $chunk;
+                @ob_flush();
+                flush();
             }
-        } catch (\Exception $e) {}
+            fclose($fp);
+        }
+    }, 200, [
+        'Content-Type' => 'multipart/x-mixed-replace; boundary=myboundary',
+        'Cache-Control' => 'no-cache, no-store, must-revalidate, private',
+        'Pragma' => 'no-cache',
+        'Expires' => '0',
+        'X-Accel-Buffering' => 'no'
+    ]);
+});
+
+// API Endpoint Snapshot Frame CCTV Real-Time (Sangat cepat, ringan, cocok untuk koneksi internet luar jaringan & mobile)
+Route::get('/api/cctv-snapshot', function () {
+    $oid = request('oid', 4);
+    $url = "http://127.0.0.1:8090/grab.jpg?oid={$oid}";
+
+    if (function_exists('session_write_close')) {
+        @session_write_close();
     }
 
-    // Fallback stream video bergerak jika Agent DVR offline
-    return redirect('https://assets.mixkit.co/videos/preview/mixkit-security-camera-recording-a-hallway-40917-large.mp4');
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => 'GET',
+            'timeout' => 1.2,
+            'header' => "Connection: close\r\n"
+        ]
+    ]);
+
+    $data = @file_get_contents($url, false, $ctx);
+    if ($data !== false && strlen($data) > 100) {
+        return response($data, 200, [
+            'Content-Type' => 'image/jpeg',
+            'Cache-Control' => 'no-cache, no-store, must-revalidate, max-age=0',
+            'Pragma' => 'no-cache',
+            'Expires' => '0'
+        ]);
+    }
+
+    return response('', 404);
+});
+
+// API Endpoint Informasi Lisensi & Akses Jarak Jauh Cloud WebRTC Agent DVR
+Route::get('/api/cctv-remote-info', function () {
+    return response()->json([
+        'status' => 'success',
+        'licensed' => true,
+        'license_email' => 'siwyviggo@gmail.com',
+        'server_name' => 'VIGGOFARADAY',
+        'server_unique' => 'daf0a74b-2215-44e3-a25d-1e66629d5dfa',
+        'cloud_portal' => 'https://www.ispyconnect.com/app/',
+        'cloud_stream_url' => 'https://www.ispyconnect.com/app/?connect=daf0a74b-2215-44e3-a25d-1e66629d5dfa&oid=4'
+    ]);
 });
 
 // API Endpoint untuk Log Real-Time
@@ -187,7 +249,13 @@ Route::get('/api/logs', function () {
 });
 
 Route::post('/api/control', function (\Illuminate\Http\Request $request) {
-    $raw = json_decode(file_get_contents('php://input'), true) ?: $request->all();
+    $raw = $request->json()->all();
+    if (empty($raw)) {
+        $raw = $request->all();
+    }
+    if (empty($raw)) {
+        $raw = json_decode($request->getContent(), true) ?: [];
+    }
     $user = auth()->user() ? auth()->user()->name : 'Viggo';
     $now = date('d/m/Y H:i:s');
 
@@ -258,15 +326,28 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
 
         // 1. Eksekusi Driver ONVIF Tapo C200 Langsung ke Kamera Fisik
         try {
-            $pyPath = base_path('tapo_move.py');
-            pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($ptzCmd), "r"));
+            $pyPath = str_replace('\\', '/', base_path('tapo_move.py'));
+            pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($ptzCmd) . " > nul 2>&1", "r"));
         } catch (\Exception $e) {}
 
         // 2. Kirim perintah ONVIF PTZ ke Agent DVR
         try {
-            Illuminate\Support\Facades\Http::timeout(0.2)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid=3&ot=2");
+            Illuminate\Support\Facades\Http::timeout(0.3)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid=4&ot=2");
         } catch (\Exception $e) {}
     }
+
+    // Antrikan ke Cloud-to-Edge queue (agar dieksekusi hardware jika web diakses dari VPS)
+    $hwQueue = Cache::get('pending_hardware_queue', []);
+    if (isset($raw['lamp1'])) {
+        $hwQueue[] = ['type' => 'lamp1', 'state' => (int)$raw['lamp1'], 'time' => time()];
+    }
+    if (isset($raw['lamp2'])) {
+        $hwQueue[] = ['type' => 'lamp2', 'state' => (int)$raw['lamp2'], 'time' => time()];
+    }
+    if (isset($raw['ptz']) || isset($raw['cctv'])) {
+        $hwQueue[] = ['type' => 'ptz', 'action' => $raw['ptz'] ?? $raw['cctv'], 'oid' => 4, 'time' => time()];
+    }
+    Cache::put('pending_hardware_queue', array_slice($hwQueue, -30), 120);
 
     $existingLogs = array_slice($existingLogs, 0, 50);
     Cache::put('activity_logs', $existingLogs, 86400);
@@ -279,10 +360,11 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
             'lamp2' => (int) Cache::get('lamp2', 1),
         ]
     ]);
-})->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class]);
+});
 
 // Dedicated Endpoint Kontrol Gerak CCTV PTZ
 Route::get('/api/cctv-ptz/{action}', function ($action) {
+    $oid = request('oid', 4);
     $user = auth()->user() ? auth()->user()->name : 'Viggo';
     $now = date('d/m/Y H:i:s');
 
@@ -320,25 +402,33 @@ Route::get('/api/cctv-ptz/{action}', function ($action) {
 
     // 1. Eksekusi Driver ONVIF Tapo C200 Langsung ke Kamera Fisik
     try {
-        $pyPath = base_path('tapo_move.py');
-        pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($action), "r"));
+        $pyPath = str_replace('\\', '/', base_path('tapo_move.py'));
+        pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($action) . " > nul 2>&1", "r"));
     } catch (\Exception $e) {}
 
     // 2. Tembak Agent DVR ONVIF PTZ Command
     try {
-        Illuminate\Support\Facades\Http::timeout(0.2)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid=4&ot=2");
+        Illuminate\Support\Facades\Http::timeout(0.3)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid={$oid}&ot=2");
+        Illuminate\Support\Facades\Http::timeout(0.3)->get("http://localhost:8090/command/ptzDirection?dir={$action}&oid={$oid}&ot=2");
     } catch (\Exception $e) {}
+
+    // Antrikan juga ke hardware queue jika diakses dari VPS
+    $hwQueue = Cache::get('pending_hardware_queue', []);
+    $hwQueue[] = ['type' => 'ptz', 'action' => $action, 'oid' => $oid, 'time' => time()];
+    Cache::put('pending_hardware_queue', array_slice($hwQueue, -30), 120);
 
     return response()->json([
         'status' => 'success',
         'action' => $action,
+        'oid' => $oid,
         'ispyCmd' => $ispyCmd,
         'message' => 'Perintah ONVIF PTZ ' . $dirText . ' berhasil dikirim ke kamera fisik Tapo C200!'
     ]);
 });
 
-// Dedicated Endpoint Kontrol Power ON / OFF Kamera 4 di Agent DVR
+// Dedicated Endpoint Kontrol Power ON / OFF Kamera di Agent DVR
 Route::get('/api/cctv-power/{action}', function ($action) {
+    $oid = request('oid', 4);
     $user = auth()->user() ? auth()->user()->name : 'Viggo';
     $now = date('d/m/Y H:i:s');
     $isOn = strtolower($action) === 'on';
@@ -350,23 +440,116 @@ Route::get('/api/cctv-power/{action}', function ($action) {
     array_unshift($existingLogs, [
         'time' => $now,
         'user' => $user,
-        'action' => $actionText . ' Kamera Pengawas CCTV (Kamera 4)',
+        'action' => $actionText . " Kamera Pengawas CCTV (oid={$oid})",
         'device' => 'Agent DVR Video Server',
-        'param' => 'Command: ' . $agentCmd . ' (oid=4)',
+        'param' => 'Command: ' . $agentCmd . " (oid={$oid})",
         'status' => 'EXECUTED'
     ]);
     Cache::put('activity_logs', array_slice($existingLogs, 0, 50), 86400);
 
     // 2. Eksekusi Perintah Switch ON / OFF ke Agent DVR
     try {
-        Illuminate\Support\Facades\Http::timeout(1.0)->get("http://localhost:8090/q.json?cmd={$agentCmd}&oid=4&ot=2");
+        Illuminate\Support\Facades\Http::timeout(1.0)->get("http://localhost:8090/q.json?cmd={$agentCmd}&oid={$oid}&ot=2");
     } catch (\Exception $e) {}
+
+    // Antrikan ke hardware queue
+    $hwQueue = Cache::get('pending_hardware_queue', []);
+    $hwQueue[] = ['type' => 'power', 'action' => $action, 'oid' => $oid, 'time' => time()];
+    Cache::put('pending_hardware_queue', array_slice($hwQueue, -30), 120);
 
     return response()->json([
         'status' => 'success',
         'action' => $action,
+        'oid' => $oid,
         'agentCmd' => $agentCmd,
-        'message' => 'Kamera 4 di Agent DVR berhasil di-' . strtoupper($action) . '!'
+        'message' => "Kamera Pengawas (oid={$oid}) berhasil di-" . ($isOn ? 'aktifkan' : 'non-aktifkan')
+    ]);
+});
+
+// =========================================================================
+// CLOUD-TO-EDGE RELAY: SNAPSHOT, FRAME UPLOAD & HARDWARE POLLING
+// =========================================================================
+
+// 1. Endpoint Snapshot CCTV (Mendukung Lokal Agent DVR & Cloud VPS Frame Relay)
+Route::get('/api/cctv-snapshot', function () {
+    $oid = request('oid', 4);
+    $frameFile = storage_path("app/cctv_frame_{$oid}.jpg");
+
+    // Prioritas 1: Periksa apakah ada frame terbaru yang di-upload oleh Edge Gateway laptop (< 15 detik lalu)
+    if (file_exists($frameFile) && (time() - filemtime($frameFile)) < 15) {
+        return response()->file($frameFile, [
+            'Content-Type' => 'image/jpeg',
+            'Cache-Control' => 'no-cache, no-store, must-revalidate, max-age=0',
+            'Pragma' => 'no-cache',
+            'Expires' => '0'
+        ]);
+    }
+
+    // Prioritas 2: Jika server berjalan di lokal (Localhost / LAN), ambil langsung dari Agent DVR lokal
+    try {
+        $res = Illuminate\Support\Facades\Http::timeout(1.0)->get("http://localhost:8090/grab.jpg?oid={$oid}");
+        if ($res->successful() && strlen($res->body()) > 100) {
+            return response($res->body(), 200, [
+                'Content-Type' => 'image/jpeg',
+                'Cache-Control' => 'no-cache, no-store, must-revalidate, max-age=0',
+                'Pragma' => 'no-cache',
+                'Expires' => '0'
+            ]);
+        }
+    } catch (\Exception $e) {}
+
+    // Prioritas 3: Standby / Offline SVG Placeholder animasi informatif (Bukan layar hitam kosong!)
+    $svg = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+        <rect width="640" height="360" fill="#020617"/>
+        <circle cx="320" cy="150" r="36" fill="#0f172a" stroke="#0ea5e9" stroke-width="2"/>
+        <path d="M308 142 L320 132 L332 142 M320 134 L320 168" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round"/>
+        <text x="320" y="215" font-family="monospace" font-size="13" font-weight="bold" fill="#38bdf8" text-anchor="middle">EDGE GATEWAY RELAY STANDBY</text>
+        <text x="320" y="240" font-family="monospace" font-size="11" fill="#64748b" text-anchor="middle">Menunggu sinyal video live dari Edge Gateway laptop...</text>
+        <text x="320" y="260" font-family="monospace" font-size="10" fill="#0ea5e9" text-anchor="middle">Jalankan: python edge_gateway.py</text>
+    </svg>';
+    return response($svg, 200, [
+        'Content-Type' => 'image/svg+xml',
+        'Cache-Control' => 'no-cache, no-store, must-revalidate'
+    ]);
+});
+
+// 2. Endpoint Upload Frame Gambar dari Edge Gateway (Laptop) ke Cloud VPS
+Route::post('/api/cctv/upload-frame', function (\Illuminate\Http\Request $request) {
+    $oid = $request->input('oid', 4);
+    $frameData = null;
+
+    if ($request->hasFile('frame')) {
+        $frameData = file_get_contents($request->file('frame')->getRealPath());
+    } elseif ($request->getContent()) {
+        $frameData = $request->getContent();
+    }
+
+    if ($frameData && strlen($frameData) > 50) {
+        $frameFile = storage_path("app/cctv_frame_{$oid}.jpg");
+        file_put_contents($frameFile, $frameData);
+        return response()->json([
+            'status' => 'success',
+            'oid' => $oid,
+            'bytes' => strlen($frameData),
+            'timestamp' => microtime(true)
+        ]);
+    }
+
+    return response()->json(['status' => 'error', 'message' => 'Frame kosong atau format tidak valid'], 400);
+});
+
+// 3. Endpoint Polling Perintah Hardware untuk Edge Gateway (Laptop)
+Route::get('/api/hardware/poll', function () {
+    $queueFile = storage_path('app/hardware_queue.json');
+    $pending = [];
+    if (file_exists($queueFile)) {
+        $pending = json_decode(file_get_contents($queueFile), true) ?: [];
+        file_put_contents($queueFile, json_encode([]));
+    }
+    return response()->json([
+        'status' => 'success',
+        'count' => count($pending),
+        'commands' => $pending
     ]);
 });
 
@@ -501,7 +684,7 @@ Route::post('/api/cctv-devices', function (Illuminate\Http\Request $request) {
         'message' => "Kamera {$name} berhasil ditambahkan dan diaktifkan!",
         'device' => $newDevice
     ]);
-})->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class]);
+});
 
 // 3. Ganti Kamera Aktif (Switch Camera)
 Route::post('/api/cctv-devices/switch/{id}', function ($id) {
@@ -545,7 +728,7 @@ Route::post('/api/cctv-devices/switch/{id}', function ($id) {
         'message' => "Beralih ke {$activeDev['name']}",
         'active' => $activeDev
     ]);
-})->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class]);
+});
 
 // 4. Hapus Device Kamera
 Route::delete('/api/cctv-devices/{id}', function ($id) {
@@ -572,7 +755,7 @@ Route::delete('/api/cctv-devices/{id}', function ($id) {
         'message' => 'Kamera berhasil dihapus!',
         'devices' => $filtered
     ]);
-})->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class]);
+});
 
 // 5. Uji Koneksi Kamera (Ping Socket Test)
 Route::post('/api/cctv-devices/test', function (Illuminate\Http\Request $request) {
@@ -616,6 +799,6 @@ Route::post('/api/cctv-devices/test', function (Illuminate\Http\Request $request
         'online' => false,
         'message' => "Tidak dapat terhubung ke {$ip}:{$port}. Pastikan IP dan kamera terhubung ke jaringan."
     ]);
-})->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class]);
+});
 
 require __DIR__.'/auth.php';

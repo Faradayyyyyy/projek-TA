@@ -1,19 +1,48 @@
 import sys
 import time
 import os
+import json
 import base64
 import hashlib
 from datetime import datetime, timezone
 import requests
 
 # =========================================================================
-# KONFIGURASI KAMERA 4 TAPO C200 (ONVIF)
+# KONFIGURASI KAMERA TAPO C200 (ONVIF)
 # =========================================================================
-IP = "10.32.72.46"
+IP = "10.32.72.78"
 PORT = 2020
 USER = "faradays"
 PASS = "12345678"
 PROFILE_TOKEN = "profile_1"
+
+def safe_print(*args, **kwargs):
+    try:
+        print(*args, **kwargs)
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+def load_config():
+    global IP, PORT, USER, PASS
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cfg_path = os.path.join(script_dir, 'storage', 'app', 'cctv_devices.json')
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                devices = json.load(f)
+                active = next((d for d in devices if d.get('is_active')), devices[0] if devices else None)
+                if active:
+                    if active.get('ip'):
+                        IP = active.get('ip')
+                    if active.get('port'):
+                        PORT = int(active.get('port'))
+                    if active.get('user'):
+                        USER = active.get('user')
+                    if active.get('pass'):
+                        PASS = active.get('pass')
+    except Exception:
+        pass
 
 def generate_wsse():
     created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -85,7 +114,7 @@ def move_tapo(direction):
             </tptz:Position>
         </tptz:AbsoluteMove>"""
         code, text = send_soap("http://www.onvif.org/ver20/ptz/wsdl/AbsoluteMove", body_home)
-        print(f"Home status: {code}")
+        safe_print(f"Home status: {code}")
         return code, text
     elif direction == "stop":
         body = f"""<tptz:Stop>
@@ -105,14 +134,23 @@ def move_tapo(direction):
     </tptz:ContinuousMove>"""
     
     code, text = send_soap("http://www.onvif.org/ver20/ptz/wsdl/ContinuousMove", body)
-    print(f"Move '{direction}' status: {code}")
+    safe_print(f"Move '{direction}' status: {code}")
     
     # 2. Rotasi selama 0.4 detik lalu stop
     time.sleep(0.4)
     code_stop, _ = move_tapo("stop")
-    print(f"Stop status: {code_stop}")
+    safe_print(f"Stop status: {code_stop}")
     return code, text
 
 if __name__ == "__main__":
+    load_config()
+    
     direction = sys.argv[1].lower() if len(sys.argv) > 1 else "right"
+    if len(sys.argv) > 2 and sys.argv[2]:
+        IP = sys.argv[2]
+    if len(sys.argv) > 3 and sys.argv[3]:
+        USER = sys.argv[3]
+    if len(sys.argv) > 4 and sys.argv[4]:
+        PASS = sys.argv[4]
+        
     move_tapo(direction)
