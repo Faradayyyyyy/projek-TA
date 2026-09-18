@@ -248,6 +248,52 @@ Route::get('/api/logs', function () {
     return response()->json($logs);
 });
 
+// =========================================================================
+// HELPER ANTRIAN PERINTAH HARDWARE CLOUD-TO-EDGE (ZERO DELAY)
+// =========================================================================
+function pushHardwareCommand($command) {
+    // 1. Simpan ke file queue di storage (Instan & aman untuk multi-proses / Linux VPS)
+    try {
+        $queueFile = storage_path('app/hardware_queue.json');
+        $queue = [];
+        if (file_exists($queueFile)) {
+            $queue = json_decode(@file_get_contents($queueFile), true) ?: [];
+        }
+        $queue[] = $command;
+        @file_put_contents($queueFile, json_encode(array_slice($queue, -30)));
+    } catch (\Exception $e) {}
+
+    // 2. Simpan juga ke Cache Laravel
+    try {
+        $cacheQueue = Cache::get('pending_hardware_queue', []);
+        $cacheQueue[] = $command;
+        Cache::put('pending_hardware_queue', array_slice($cacheQueue, -30), 120);
+    } catch (\Exception $e) {}
+}
+
+function popHardwareCommands() {
+    $commands = [];
+    try {
+        $queueFile = storage_path('app/hardware_queue.json');
+        if (file_exists($queueFile)) {
+            $fileCommands = json_decode(@file_get_contents($queueFile), true) ?: [];
+            if (!empty($fileCommands)) {
+                $commands = array_merge($commands, $fileCommands);
+                @file_put_contents($queueFile, json_encode([]));
+            }
+        }
+    } catch (\Exception $e) {}
+
+    try {
+        $cacheCommands = Cache::pull('pending_hardware_queue', []);
+        if (!empty($cacheCommands)) {
+            $commands = array_merge($commands, $cacheCommands);
+        }
+    } catch (\Exception $e) {}
+
+    return $commands;
+}
+
 Route::post('/api/control', function (\Illuminate\Http\Request $request) {
     $raw = $request->json()->all();
     if (empty($raw)) {
@@ -272,6 +318,7 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
 
     if (isset($raw['lamp1'])) {
         Cache::put('lamp1', (int) $raw['lamp1'], 86400);
+        pushHardwareCommand(['type' => 'lamp1', 'state' => (int)$raw['lamp1'], 'time' => microtime(true)]);
         array_unshift($existingLogs, [
             'time' => $now,
             'user' => $user,
@@ -283,6 +330,7 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
     }
     if (isset($raw['lamp2'])) {
         Cache::put('lamp2', (int) $raw['lamp2'], 86400);
+        pushHardwareCommand(['type' => 'lamp2', 'state' => (int)$raw['lamp2'], 'time' => microtime(true)]);
         array_unshift($existingLogs, [
             'time' => $now,
             'user' => $user,
@@ -315,6 +363,8 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
         $dirText = $directionNames[$ptzCmd] ?? strtoupper($ptzCmd);
         $ispyCmd = $ispyMap[$ptzCmd] ?? 'ispydir_4';
         
+        pushHardwareCommand(['type' => 'ptz', 'action' => $ptzCmd, 'oid' => 4, 'time' => microtime(true)]);
+
         array_unshift($existingLogs, [
             'time' => $now,
             'user' => $user,
@@ -324,30 +374,18 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
             'status' => 'EXECUTED'
         ]);
 
-        // 1. Eksekusi Driver ONVIF Tapo C200 Langsung ke Kamera Fisik
-        try {
-            $pyPath = str_replace('\\', '/', base_path('tapo_move.py'));
-            pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($ptzCmd) . " > nul 2>&1", "r"));
-        } catch (\Exception $e) {}
+        // Eksekusi lokal HANYA jika server di Windows / Localhost
+        if (PHP_OS_FAMILY === 'Windows' || in_array(request()->getHost(), ['localhost', '127.0.0.1'])) {
+            try {
+                $pyPath = str_replace('\\', '/', base_path('tapo_move.py'));
+                pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($ptzCmd) . " > nul 2>&1", "r"));
+            } catch (\Exception $e) {}
 
-        // 2. Kirim perintah ONVIF PTZ ke Agent DVR
-        try {
-            Illuminate\Support\Facades\Http::timeout(0.3)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid=4&ot=2");
-        } catch (\Exception $e) {}
+            try {
+                Illuminate\Support\Facades\Http::timeout(0.05)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid=4&ot=2");
+            } catch (\Exception $e) {}
+        }
     }
-
-    // Antrikan ke Cloud-to-Edge queue (agar dieksekusi hardware jika web diakses dari VPS)
-    $hwQueue = Cache::get('pending_hardware_queue', []);
-    if (isset($raw['lamp1'])) {
-        $hwQueue[] = ['type' => 'lamp1', 'state' => (int)$raw['lamp1'], 'time' => time()];
-    }
-    if (isset($raw['lamp2'])) {
-        $hwQueue[] = ['type' => 'lamp2', 'state' => (int)$raw['lamp2'], 'time' => time()];
-    }
-    if (isset($raw['ptz']) || isset($raw['cctv'])) {
-        $hwQueue[] = ['type' => 'ptz', 'action' => $raw['ptz'] ?? $raw['cctv'], 'oid' => 4, 'time' => time()];
-    }
-    Cache::put('pending_hardware_queue', array_slice($hwQueue, -30), 120);
 
     $existingLogs = array_slice($existingLogs, 0, 50);
     Cache::put('activity_logs', $existingLogs, 86400);
@@ -400,22 +438,20 @@ Route::get('/api/cctv-ptz/{action}', function ($action) {
     ]);
     Cache::put('activity_logs', array_slice($existingLogs, 0, 50), 86400);
 
-    // 1. Eksekusi Driver ONVIF Tapo C200 Langsung ke Kamera Fisik
-    try {
-        $pyPath = str_replace('\\', '/', base_path('tapo_move.py'));
-        pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($action) . " > nul 2>&1", "r"));
-    } catch (\Exception $e) {}
+    // 1. Antrikan ke Cloud-to-Edge queue SEKETIKA (< 1 ms, Zero Delay)
+    pushHardwareCommand(['type' => 'ptz', 'action' => $action, 'oid' => $oid, 'time' => microtime(true)]);
 
-    // 2. Tembak Agent DVR ONVIF PTZ Command
-    try {
-        Illuminate\Support\Facades\Http::timeout(0.3)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid={$oid}&ot=2");
-        Illuminate\Support\Facades\Http::timeout(0.3)->get("http://localhost:8090/command/ptzDirection?dir={$action}&oid={$oid}&ot=2");
-    } catch (\Exception $e) {}
+    // 2. Eksekusi lokal HANYA jika server berjalan di Windows / Localhost
+    if (PHP_OS_FAMILY === 'Windows' || in_array(request()->getHost(), ['localhost', '127.0.0.1'])) {
+        try {
+            $pyPath = str_replace('\\', '/', base_path('tapo_move.py'));
+            pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($action) . " > nul 2>&1", "r"));
+        } catch (\Exception $e) {}
 
-    // Antrikan juga ke hardware queue jika diakses dari VPS
-    $hwQueue = Cache::get('pending_hardware_queue', []);
-    $hwQueue[] = ['type' => 'ptz', 'action' => $action, 'oid' => $oid, 'time' => time()];
-    Cache::put('pending_hardware_queue', array_slice($hwQueue, -30), 120);
+        try {
+            Illuminate\Support\Facades\Http::timeout(0.05)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid={$oid}&ot=2");
+        } catch (\Exception $e) {}
+    }
 
     return response()->json([
         'status' => 'success',
@@ -447,15 +483,15 @@ Route::get('/api/cctv-power/{action}', function ($action) {
     ]);
     Cache::put('activity_logs', array_slice($existingLogs, 0, 50), 86400);
 
-    // 2. Eksekusi Perintah Switch ON / OFF ke Agent DVR
-    try {
-        Illuminate\Support\Facades\Http::timeout(1.0)->get("http://localhost:8090/q.json?cmd={$agentCmd}&oid={$oid}&ot=2");
-    } catch (\Exception $e) {}
+    // 2. Antrikan ke hardware queue
+    pushHardwareCommand(['type' => 'power', 'action' => $action, 'oid' => $oid, 'time' => microtime(true)]);
 
-    // Antrikan ke hardware queue
-    $hwQueue = Cache::get('pending_hardware_queue', []);
-    $hwQueue[] = ['type' => 'power', 'action' => $action, 'oid' => $oid, 'time' => time()];
-    Cache::put('pending_hardware_queue', array_slice($hwQueue, -30), 120);
+    // 3. Eksekusi lokal jika di Windows / Localhost
+    if (PHP_OS_FAMILY === 'Windows' || in_array(request()->getHost(), ['localhost', '127.0.0.1'])) {
+        try {
+            Illuminate\Support\Facades\Http::timeout(0.1)->get("http://localhost:8090/q.json?cmd={$agentCmd}&oid={$oid}&ot=2");
+        } catch (\Exception $e) {}
+    }
 
     return response()->json([
         'status' => 'success',
@@ -526,35 +562,28 @@ Route::post('/api/cctv/upload-frame', function (\Illuminate\Http\Request $reques
 
     if ($frameData && strlen($frameData) > 50) {
         $frameFile = storage_path("app/cctv_frame_{$oid}.jpg");
-        file_put_contents($frameFile, $frameData);
-        return response()->json([
-            'status' => 'success',
-            'oid' => $oid,
-            'bytes' => strlen($frameData),
-            'timestamp' => microtime(true)
-        ]);
+        @file_put_contents($frameFile, $frameData);
     }
 
-    return response()->json(['status' => 'error', 'message' => 'Frame kosong atau format tidak valid'], 400);
+    // Selipkan antrian perintah hardware langsung dalam response upload frame (< 50ms interval, Zero Delay!)
+    $commands = popHardwareCommands();
+
+    return response()->json([
+        'status' => 'success',
+        'oid' => $oid,
+        'bytes' => $frameData ? strlen($frameData) : 0,
+        'commands' => $commands,
+        'timestamp' => microtime(true)
+    ]);
 });
 
 // 3. Endpoint Polling Perintah Hardware untuk Edge Gateway (Laptop)
 Route::get('/api/hardware/poll', function () {
-    $pending = Cache::pull('pending_hardware_queue', []);
-
-    $queueFile = storage_path('app/hardware_queue.json');
-    if (file_exists($queueFile)) {
-        $fileCommands = json_decode(file_get_contents($queueFile), true) ?: [];
-        if (!empty($fileCommands)) {
-            $pending = array_merge($pending, $fileCommands);
-            file_put_contents($queueFile, json_encode([]));
-        }
-    }
-
+    $commands = popHardwareCommands();
     return response()->json([
         'status' => 'success',
-        'count' => count($pending),
-        'commands' => $pending
+        'count' => count($commands),
+        'commands' => $commands
     ]);
 });
 
