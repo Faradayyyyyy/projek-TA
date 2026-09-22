@@ -9,11 +9,13 @@ Route::get('/', function () {
     return redirect('/dashboard');
 });
 
-// Route Kontrol Lampu 1 (Servo 1)
-Route::get('/kontrol/lampu1/{aksi}', [LampuController::class, 'kontrolLampu1'])->name('lampu1.kontrol');
+// Route Kontrol Lampu 1, Lampu 2, dan Motor Servo via MQTT Protocol
+Route::match(['get', 'post'], '/kontrol/lampu1/{aksi?}', [LampuController::class, 'kontrolLampu1'])->name('lampu1.kontrol');
+Route::match(['get', 'post'], '/kontrol/lampu2/{aksi?}', [LampuController::class, 'kontrolLampu2'])->name('lampu2.kontrol');
+Route::match(['get', 'post'], '/kontrol/servo/{aksi?}', [LampuController::class, 'kontrolServo'])->name('servo.kontrol');
 
-// Route Kontrol Lampu 2 (Servo 2)
-Route::get('/kontrol/lampu2/{aksi}', [LampuController::class, 'kontrolLampu2'])->name('lampu2.kontrol');
+// Route API Kontrol MQTT Terpadu (AJAX / REST)
+Route::post('/api/mqtt/control', [LampuController::class, 'kontrolMqtt'])->name('mqtt.control');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('/dashboard', function () {
@@ -319,6 +321,9 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
     if (isset($raw['lamp1'])) {
         Cache::put('lamp1', (int) $raw['lamp1'], 86400);
         pushHardwareCommand(['type' => 'lamp1', 'state' => (int)$raw['lamp1'], 'time' => microtime(true)]);
+        try {
+            app(\App\Http\Controllers\LampuController::class)->kontrolLampu1($request, $raw['lamp1'] == 1 ? 'ON' : 'OFF');
+        } catch (\Throwable $e) {}
         array_unshift($existingLogs, [
             'time' => $now,
             'user' => $user,
@@ -331,6 +336,9 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
     if (isset($raw['lamp2'])) {
         Cache::put('lamp2', (int) $raw['lamp2'], 86400);
         pushHardwareCommand(['type' => 'lamp2', 'state' => (int)$raw['lamp2'], 'time' => microtime(true)]);
+        try {
+            app(\App\Http\Controllers\LampuController::class)->kontrolLampu2($request, $raw['lamp2'] == 1 ? 'ON' : 'OFF');
+        } catch (\Throwable $e) {}
         array_unshift($existingLogs, [
             'time' => $now,
             'user' => $user,
@@ -339,6 +347,11 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
             'param' => $raw['lamp2'] == 1 ? 'Angle: 90° (ON)' : 'Angle: 0° (OFF)',
             'status' => 'SUCCESS'
         ]);
+    }
+    if (isset($raw['servo'])) {
+        try {
+            app(\App\Http\Controllers\LampuController::class)->kontrolServo($request, $raw['servo']);
+        } catch (\Throwable $e) {}
     }
     if (isset($raw['ptz']) || isset($raw['cctv'])) {
         $ptzCmd = $raw['ptz'] ?? $raw['cctv'];
