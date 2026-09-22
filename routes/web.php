@@ -33,6 +33,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('/device-status', function () {
         return view('device-status');
     })->name('device.status');
+
+    Route::get('/camera-settings', function () {
+        return view('camera-settings');
+    })->name('camera.settings');
 });
 
 Route::middleware('auth')->group(function () {
@@ -581,11 +585,15 @@ Route::post('/api/cctv/upload-frame', function (\Illuminate\Http\Request $reques
     // Selipkan antrian perintah hardware langsung dalam response upload frame (< 50ms interval, Zero Delay!)
     $commands = popHardwareCommands();
 
+    $devices = getCctvDeviceList();
+    $active = collect($devices)->firstWhere('is_active', true) ?: ($devices[0] ?? null);
+
     return response()->json([
         'status' => 'success',
         'oid' => $oid,
         'bytes' => $frameData ? strlen($frameData) : 0,
         'commands' => $commands,
+        'active_camera' => $active,
         'timestamp' => microtime(true)
     ]);
 });
@@ -601,7 +609,7 @@ Route::get('/api/hardware/poll', function () {
 });
 
 // =========================================================================
-// API ENDPOINT MANAJEMEN DEVICE CCTV (TAMBAH / HAPUS / GANTI KAMERA)
+// API ENDPOINT MANAJEMEN DEVICE CCTV (TAMBAH / EDIT / HAPUS / GANTI KAMERA)
 // =========================================================================
 
 function getCctvDeviceList() {
@@ -611,27 +619,27 @@ function getCctvDeviceList() {
             [
                 'id' => 'cam_4',
                 'name' => 'Kamera 4 (Tapo C200 Lab 2)',
-                'brand' => 'Tapo C200 / ONVIF',
-                'ip' => '10.32.72.46',
+                'brand' => 'Tapo C200 / ONVIF PTZ',
+                'ip' => '10.32.72.78',
                 'port' => 2020,
                 'rtsp_port' => 554,
                 'user' => 'faradays',
                 'pass' => '12345678',
                 'stream_url' => 'http://localhost:8090/video.mjpg?oid=4',
-                'rtsp_url' => 'rtsp://10.32.72.46:554/stream2',
+                'rtsp_url' => 'rtsp://10.32.72.78:554/stream2',
                 'oid' => '4',
                 'is_active' => true
             ]
         ];
-        file_put_contents($path, json_encode($default, JSON_PRETTY_PRINT));
+        @file_put_contents($path, json_encode($default, JSON_PRETTY_PRINT));
         return $default;
     }
-    return json_decode(file_get_contents($path), true) ?: [];
+    return json_decode(@file_get_contents($path), true) ?: [];
 }
 
 function saveCctvDeviceList($devices) {
     $path = storage_path('app/cctv_devices.json');
-    file_put_contents($path, json_encode($devices, JSON_PRETTY_PRINT));
+    @file_put_contents($path, json_encode($devices, JSON_PRETTY_PRINT));
 }
 
 // 1. Ambil Semua Daftar Kamera & Kamera Aktif
@@ -645,18 +653,19 @@ Route::get('/api/cctv-devices', function () {
     ]);
 });
 
-// 2. Tambah Device Kamera Baru dari Web
+// 2. Tambah / Edit Device Kamera dari Web
 Route::post('/api/cctv-devices', function (Illuminate\Http\Request $request) {
     $raw = json_decode($request->getContent(), true) ?: [];
     $data = array_merge($request->all(), $raw);
     
-    $name = $data['name'] ?? null;
-    $ip = $data['ip'] ?? null;
+    $id = !empty($data['id']) ? trim((string)$data['id']) : null;
+    $name = trim($data['name'] ?? '');
+    $ip = trim($data['ip'] ?? '');
     $port = (int)($data['port'] ?? 2020);
     $rtspPort = (int)($data['rtsp_port'] ?? 554);
-    $brand = $data['brand'] ?? 'ONVIF IP Camera';
-    $user = $data['user'] ?? 'admin';
-    $pass = $data['pass'] ?? '';
+    $brand = $data['brand'] ?? 'Tapo C200 / ONVIF PTZ';
+    $user = trim($data['user'] ?? 'faradays');
+    $pass = trim($data['pass'] ?? '');
     $oid = !empty($data['oid']) ? (string)$data['oid'] : null;
 
     if (empty($name) || empty($ip)) {
@@ -664,38 +673,70 @@ Route::post('/api/cctv-devices', function (Illuminate\Http\Request $request) {
     }
 
     $devices = getCctvDeviceList();
-    $newId = 'cam_' . (count($devices) + 1) . '_' . time();
-    $assignedOid = $oid ?: (string)(count($devices) + 1);
+    $targetDevice = null;
+    $isUpdate = false;
 
-    $streamUrl = !empty($data['stream_url']) 
-        ? $data['stream_url'] 
-        : "http://localhost:8090/video.mjpg?oid={$assignedOid}";
-
-    $rtspUrl = !empty($data['rtsp_url'])
-        ? $data['rtsp_url']
-        : "rtsp://{$ip}:{$rtspPort}/stream2";
-
-    // Non-aktifkan kamera lama, kamera baru otomatis aktif
-    foreach ($devices as &$dev) {
-        $dev['is_active'] = false;
+    if ($id) {
+        // Mode Update / Edit Kamera yang Sudah Terdaftar
+        foreach ($devices as &$dev) {
+            if ($dev['id'] === $id) {
+                $dev['name'] = $name;
+                $dev['brand'] = $brand;
+                $dev['ip'] = $ip;
+                $dev['port'] = $port;
+                $dev['rtsp_port'] = $rtspPort;
+                $dev['user'] = $user;
+                if ($pass !== '') {
+                    $dev['pass'] = $pass;
+                }
+                if ($oid) {
+                    $dev['oid'] = $oid;
+                }
+                $dev['stream_url'] = !empty($data['stream_url']) ? $data['stream_url'] : "http://localhost:8090/video.mjpg?oid={$dev['oid']}";
+                $dev['rtsp_url'] = !empty($data['rtsp_url']) ? $data['rtsp_url'] : "rtsp://{$ip}:{$rtspPort}/stream2";
+                $targetDevice = $dev;
+                $isUpdate = true;
+                break;
+            }
+        }
     }
 
-    $newDevice = [
-        'id' => $newId,
-        'name' => $name,
-        'brand' => $brand,
-        'ip' => $ip,
-        'port' => $port,
-        'rtsp_port' => $rtspPort,
-        'user' => $user,
-        'pass' => $pass,
-        'stream_url' => $streamUrl,
-        'rtsp_url' => $rtspUrl,
-        'oid' => $assignedOid,
-        'is_active' => true
-    ];
+    if (!$isUpdate) {
+        // Mode Tambah Kamera Baru
+        $newId = 'cam_' . (count($devices) + 1) . '_' . time();
+        $assignedOid = $oid ?: (string)(count($devices) + 1);
 
-    $devices[] = $newDevice;
+        $streamUrl = !empty($data['stream_url']) 
+            ? $data['stream_url'] 
+            : "http://localhost:8090/video.mjpg?oid={$assignedOid}";
+
+        $rtspUrl = !empty($data['rtsp_url'])
+            ? $data['rtsp_url']
+            : "rtsp://{$ip}:{$rtspPort}/stream2";
+
+        // Non-aktifkan kamera lama, kamera baru otomatis aktif
+        foreach ($devices as &$dev) {
+            $dev['is_active'] = false;
+        }
+
+        $targetDevice = [
+            'id' => $newId,
+            'name' => $name,
+            'brand' => $brand,
+            'ip' => $ip,
+            'port' => $port,
+            'rtsp_port' => $rtspPort,
+            'user' => $user,
+            'pass' => $pass,
+            'stream_url' => $streamUrl,
+            'rtsp_url' => $rtspUrl,
+            'oid' => $assignedOid,
+            'is_active' => true
+        ];
+
+        $devices[] = $targetDevice;
+    }
+
     saveCctvDeviceList($devices);
 
     // Update tapo_move.py ke kamera baru jika ada user & pass
@@ -719,17 +760,18 @@ Route::post('/api/cctv-devices', function (Illuminate\Http\Request $request) {
     array_unshift($existingLogs, [
         'time' => date('d/m/Y H:i:s'),
         'user' => $logUser,
-        'action' => 'Menambahkan Device Kamera CCTV Baru: ' . $name,
+        'action' => ($isUpdate ? 'Memperbarui Konfigurasi Kamera: ' : 'Menambahkan Device Kamera CCTV Baru: ') . $name,
         'device' => 'CCTV Manager Web',
-        'param' => "IP: {$ip}, OID: {$assignedOid}",
-        'status' => 'ADDED'
+        'param' => "IP: {$ip}, Port: {$port}, OID: {$targetDevice['oid']}",
+        'status' => $isUpdate ? 'UPDATED' : 'ADDED'
     ]);
     Cache::put('activity_logs', array_slice($existingLogs, 0, 50), 86400);
 
     return response()->json([
         'status' => 'success',
-        'message' => "Kamera {$name} berhasil ditambahkan dan diaktifkan!",
-        'device' => $newDevice
+        'message' => $isUpdate ? "Konfigurasi kamera '{$name}' berhasil diperbarui!" : "Kamera '{$name}' berhasil ditambahkan dan diaktifkan!",
+        'device' => $targetDevice,
+        'is_update' => $isUpdate
     ]);
 });
 
@@ -808,13 +850,14 @@ Route::delete('/api/cctv-devices/{id}', function ($id) {
 Route::post('/api/cctv-devices/test', function (Illuminate\Http\Request $request) {
     $raw = json_decode($request->getContent(), true) ?: [];
     $data = array_merge($request->all(), $raw);
-    $ip = $data['ip'] ?? $request->input('ip');
+    $ip = trim($data['ip'] ?? $request->input('ip', ''));
     $port = (int)($data['port'] ?? ($request->input('port') ?: 2020));
 
     if (empty($ip)) {
         return response()->json(['status' => 'error', 'message' => 'Alamat IP wajib diisi!'], 400);
     }
 
+    // 1. Uji koneksi langsung socket TCP
     $startTime = microtime(true);
     $fp = @fsockopen($ip, $port, $errno, $errstr, 1.2);
     $latency = round((microtime(true) - $startTime) * 1000);
@@ -829,7 +872,7 @@ Route::post('/api/cctv-devices/test', function (Illuminate\Http\Request $request
         ]);
     }
 
-    // Coba port alternatif RTSP 554 jika port 2020 gagal
+    // 2. Coba port alternatif RTSP 554 jika port ONVIF gagal
     $fp2 = @fsockopen($ip, 554, $errno, $errstr, 1.0);
     if ($fp2) {
         fclose($fp2);
@@ -841,10 +884,27 @@ Route::post('/api/cctv-devices/test', function (Illuminate\Http\Request $request
         ]);
     }
 
+    // 3. Penanganan Jika Server Berjalan di Cloud VPS & IP adalah IP Private LAN (10.x / 192.168.x)
+    $isPrivateIp = preg_match('/^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)/', $ip);
+    $isCloudServer = !in_array(request()->getHost(), ['localhost', '127.0.0.1']);
+
+    if ($isPrivateIp && $isCloudServer) {
+        $lastFrame = storage_path('app/cctv_frame_4.jpg');
+        $gatewayActive = file_exists($lastFrame) && (time() - filemtime($lastFrame)) < 30;
+
+        return response()->json([
+            'status' => 'success',
+            'online' => true,
+            'is_private_subnet' => true,
+            'gateway_active' => $gatewayActive,
+            'message' => "IP {$ip} adalah IP LAN lokal. Kamera akan diakses melalui Edge Gateway laptop Anda" . ($gatewayActive ? " (Edge Gateway saat ini AKTIF)." : " (Pastikan Edge Gateway aktif di laptop).")
+        ]);
+    }
+
     return response()->json([
         'status' => 'error',
         'online' => false,
-        'message' => "Tidak dapat terhubung ke {$ip}:{$port}. Pastikan IP dan kamera terhubung ke jaringan."
+        'message' => "Tidak dapat terhubung ke {$ip}:{$port}. Pastikan IP dan kamera terhubung ke jaringan lokal yang sama."
     ]);
 });
 

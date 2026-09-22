@@ -4,19 +4,29 @@ import os
 import requests
 import json
 import threading
+import paho.mqtt.client as mqtt
 
 # =========================================================================
 # KONFIGURASI EDGE GATEWAY (LAPTOP / LOCAL SERVER)
 # =========================================================================
-# Default mengarah ke domain lab Anda
 DEFAULT_VPS_URL = "http://labotomasi.my.id"
-
-# Alamat Agent DVR lokal di laptop
 AGENT_DVR_SNAPSHOT_URL = "http://localhost:8090/grab.jpg?oid=4"
 
-# IP Mikrokontroler ESP32 Lokal
-ESP32_LAMPU1_URL = "http://10.32.72.150"
-ESP32_LAMPU2_URL = "http://10.32.72.151"
+# Broker MQTT
+MQTT_BROKER_HOST = "48.193.45.137"
+MQTT_BROKER_PORT = 1883
+
+# Inisialisasi MQTT Client Persisten
+mqtt_client = mqtt.Client(client_id="EdgeGateway_Laptop")
+
+def init_mqtt_background():
+    """Menghubungkan MQTT Client dan menjalankannya di latar belakang."""
+    try:
+        mqtt_client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=60)
+        mqtt_client.loop_start() # Jalankan MQTT loop di background thread
+        print("[*] MQTT Background Client berhasil terhubung & aktif di latar belakang.")
+    except Exception as e:
+        print(f"[!] Gagal menghubungkan MQTT Background Client: {e}")
 
 # Import driver PTZ lokal
 try:
@@ -33,14 +43,13 @@ def print_banner(vps_url):
     print("=" * 68)
     print(f"[*] Target VPS Server : {vps_url}")
     print(f"[*] Local Agent DVR   : {AGENT_DVR_SNAPSHOT_URL}")
-    print(f"[*] ESP32 Lampu 1     : {ESP32_LAMPU1_URL}")
-    print(f"[*] ESP32 Lampu 2     : {ESP32_LAMPU2_URL}")
+    print(f"[*] MQTT Broker       : {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}")
     print(f"[*] PTZ Driver Ready  : {has_ptz_driver}")
     print("=" * 68)
     print("[*] Streaming video & kontrol hardware aktif tanpa delay...\n")
 
 def execute_command_async(cmd):
-    """Mengeksekusi perintah hardware secara non-blocking di thread terpisah."""
+    """Mengeksekusi perintah hardware secara non-blocking."""
     cmd_type = cmd.get("type")
     
     if cmd_type == "ptz":
@@ -55,23 +64,25 @@ def execute_command_async(cmd):
                 
     elif cmd_type == "lamp1":
         state = cmd.get("state")
-        subcmd = "on" if state == 1 else "off"
-        print(f"\n[>>> KONTROL INSTAN] Mengubah Saklar Lampu 1: {subcmd.upper()}")
+        subcmd = "ON" if state == 1 else "OFF"
+        print(f"\n[>>> KONTROL INSTAN] Mengubah Saklar Lampu 1: {subcmd}")
         try:
-            r = requests.get(f"{ESP32_LAMPU1_URL}/lampu1/{subcmd}", timeout=1.0)
-            print(f"[✓ KONTROL SELESAI] Lampu 1 {subcmd.upper()} (HTTP {r.status_code})")
+            # Mengirim via client background yang sudah terhubung
+            mqtt_client.publish("lab/lampu1", subcmd, qos=0)
+            print(f"[✓ KONTROL SELESAI] Lampu 1 {subcmd} terkirim instan (Topic: lab/lampu1)")
         except Exception as e:
-            print(f"[!] Gagal kontak ESP32 Lampu 1: {e}")
+            print(f"[!] Gagal kirim MQTT Lampu 1: {e}")
             
     elif cmd_type == "lamp2":
         state = cmd.get("state")
-        subcmd = "on" if state == 1 else "off"
-        print(f"\n[>>> KONTROL INSTAN] Mengubah Saklar Lampu 2: {subcmd.upper()}")
+        subcmd = "ON" if state == 1 else "OFF"
+        print(f"\n[>>> KONTROL INSTAN] Mengubah Saklar Lampu 2: {subcmd}")
         try:
-            r = requests.get(f"{ESP32_LAMPU2_URL}/lampu2/{subcmd}", timeout=1.0)
-            print(f"[✓ KONTROL SELESAI] Lampu 2 {subcmd.upper()} (HTTP {r.status_code})")
+            # Mengirim via client background yang sudah terhubung
+            mqtt_client.publish("lab/lampu2", subcmd, qos=0)
+            print(f"[✓ KONTROL SELESAI] Lampu 2 {subcmd} terkirim instan (Topic: lab/lampu2)")
         except Exception as e:
-            print(f"[!] Gagal kontak ESP32 Lampu 2: {e}")
+            print(f"[!] Gagal kirim MQTT Lampu 2: {e}")
 
 def hardware_poll_worker(poll_url, session):
     """Worker thread terpisah khusus polling perintah setiap ~60ms."""
@@ -87,18 +98,63 @@ def hardware_poll_worker(poll_url, session):
             pass
         time.sleep(0.06)
 
+def sync_active_camera(cam):
+    """Menyinkronkan info kamera aktif dari VPS ke storage/app/cctv_devices.json lokal."""
+    if not cam:
+        return
+    try:
+        cfg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'storage', 'app')
+        os.makedirs(cfg_dir, exist_ok=True)
+        cfg_path = os.path.join(cfg_dir, 'cctv_devices.json')
+        devices = []
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                devices = json.load(f)
+        found = False
+        for d in devices:
+            if d.get('id') == cam.get('id'):
+                d.update(cam)
+                d['is_active'] = True
+                found = True
+            else:
+                d['is_active'] = False
+        if not found:
+            devices.append(cam)
+        with open(cfg_path, 'w', encoding='utf-8') as f:
+            json.dump(devices, f, indent=2)
+    except Exception as e:
+        pass
+
 def run_gateway(vps_url):
     vps_url = vps_url.rstrip('/')
-    # Jika tidak ada port yang disebutkan dan bukan localhost, gunakan port 80 default
-    upload_url = f"{vps_url}/api/cctv/upload-frame?oid=4"
+    current_oid = "4"
+    agent_dvr_snapshot_url = f"http://localhost:8090/grab.jpg?oid={current_oid}"
+    upload_url = f"{vps_url}/api/cctv/upload-frame?oid={current_oid}"
     poll_url = f"{vps_url}/api/hardware/poll"
 
     print_banner(vps_url)
 
+    # Jalankan koneksi MQTT Latar Belakang
+    init_mqtt_background()
+
     session = requests.Session()
     session.headers.update({"User-Agent": "EdgeGateway-IoT/2.0"})
 
-    # Jalankan background poller thread untuk responsivitas maksimal (< 40ms)
+    # Coba ambil info kamera aktif pertama kali dari VPS
+    try:
+        dev_res = session.get(f"{vps_url}/api/cctv-devices", timeout=2.0)
+        if dev_res.status_code == 200:
+            dev_data = dev_res.json()
+            active_cam = dev_data.get("active")
+            if active_cam:
+                current_oid = str(active_cam.get("oid") or "4")
+                agent_dvr_snapshot_url = f"http://localhost:8090/grab.jpg?oid={current_oid}"
+                upload_url = f"{vps_url}/api/cctv/upload-frame?oid={current_oid}"
+                sync_active_camera(active_cam)
+                print(f"[*] Kamera Aktif Awal: {active_cam.get('name', 'CCTV')} (OID {current_oid} | IP {active_cam.get('ip')})")
+    except Exception:
+        pass
+
     poller_thread = threading.Thread(target=hardware_poll_worker, args=(poll_url, session), daemon=True)
     poller_thread.start()
 
@@ -107,9 +163,9 @@ def run_gateway(vps_url):
 
     while True:
         try:
-            # 1. Ambil frame JPEG dari Agent DVR lokal
+            # 1. Ambil frame JPEG dari Agent DVR lokal sesuai OID aktif
             try:
-                res = session.get(AGENT_DVR_SNAPSHOT_URL, timeout=1.0)
+                res = session.get(agent_dvr_snapshot_url, timeout=1.0)
                 if res.status_code == 200 and len(res.content) > 100:
                     # 2. Upload frame ke Cloud VPS
                     up_res = session.post(
@@ -121,34 +177,44 @@ def run_gateway(vps_url):
                     
                     if up_res.status_code == 200:
                         fps_counter += 1
-                        # Cek apakah ada perintah hardware yang diselipkan dalam response upload
                         try:
                             resp_data = up_res.json()
                             commands = resp_data.get("commands", [])
                             for cmd in commands:
                                 threading.Thread(target=execute_command_async, args=(cmd,), daemon=True).start()
+                            
+                            # Sinkronisasi kamera aktif otomatis jika berganti di web
+                            active_cam = resp_data.get("active_camera")
+                            if active_cam:
+                                new_oid = str(active_cam.get("oid") or "4")
+                                if new_oid != current_oid:
+                                    print(f"\n[*] Beralih ke Kamera: {active_cam.get('name', 'CCTV')} (OID {new_oid} | IP {active_cam.get('ip')})")
+                                    current_oid = new_oid
+                                    agent_dvr_snapshot_url = f"http://localhost:8090/grab.jpg?oid={current_oid}"
+                                    upload_url = f"{vps_url}/api/cctv/upload-frame?oid={current_oid}"
+                                sync_active_camera(active_cam)
                         except Exception:
                             pass
                     else:
                         print(f"[!] Upload frame gagal: HTTP {up_res.status_code}")
                 else:
                     time.sleep(0.3)
-            except requests.exceptions.RequestException as e:
+            except requests.exceptions.RequestException:
                 time.sleep(0.5)
 
             # Hitung statistik FPS setiap 5 detik
             now = time.time()
             if now - fps_timer >= 5.0:
                 calc_fps = fps_counter / (now - fps_timer)
-                print(f"[STREAM LIVE] Aliran Video ke Cloud Aktif: ~{calc_fps:.1f} FPS (Latensi Rendah)")
+                print(f"[STREAM LIVE] Aliran Video ke Cloud Aktif: ~{calc_fps:.1f} FPS (OID {current_oid})")
                 fps_counter = 0
                 fps_timer = now
 
-            # Kecepatan frame ~12 FPS (80ms jeda)
             time.sleep(0.08)
 
         except KeyboardInterrupt:
             print("\n[*] Edge Gateway dihentikan oleh pengguna.")
+            mqtt_client.loop_stop() # Hentikan thread MQTT saat dihentikan
             break
         except Exception as e:
             print(f"[!] Error loop utama: {e}")

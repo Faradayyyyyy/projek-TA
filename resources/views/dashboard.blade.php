@@ -590,7 +590,7 @@
                         <i data-lucide="plus-circle" class="w-6 h-6"></i>
                     </div>
                     <div>
-                        <h3 class="text-lg font-bold text-white leading-tight">Tambah Device CCTV Baru</h3>
+                        <h3 id="modal-add-cctv-title" class="text-lg font-bold text-white leading-tight">Tambah Device CCTV Baru</h3>
                         <p class="text-xs text-slate-400 font-mono">Daftarkan kamera IP / RTSP / ONVIF tanpa perlu buka Agent DVR</p>
                     </div>
                 </div>
@@ -599,8 +599,9 @@
                 </button>
             </div>
 
-            <!-- Form Tambah Kamera -->
+            <!-- Form Tambah / Edit Kamera -->
             <form id="form-add-cctv" onsubmit="submitAddCameraForm(event)" class="space-y-4">
+                <input type="hidden" id="add-cam-id" value="">
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <!-- Nama Kamera -->
                     <div class="space-y-1.5 sm:col-span-2">
@@ -696,10 +697,10 @@
                                 class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs font-mono transition-all">
                             Batal
                         </button>
-                        <button type="submit" 
-                                class="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-white font-bold rounded-xl text-xs font-mono flex items-center gap-2 shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all active:scale-95">
-                            <i data-lucide="save" class="w-4 h-4"></i>
-                            <span>Simpan & Aktifkan</span>
+                        <button type="submit" id="btn-save-cam"
+                                class="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-white font-bold rounded-xl text-xs font-mono flex items-center gap-2 shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <i id="btn-save-cam-icon" data-lucide="save" class="w-4 h-4"></i>
+                            <span id="btn-save-cam-text">Simpan & Aktifkan</span>
                         </button>
                     </div>
                 </div>
@@ -1331,12 +1332,50 @@
         let currentCctvList = [];
         let currentActiveCctv = null;
 
-        function openAddCameraModal() {
+        function openAddCameraModal(targetCam = null) {
             const modal = document.getElementById('modal-add-cctv');
+            const titleEl = document.getElementById('modal-add-cctv-title');
+            const btnText = document.getElementById('btn-save-cam-text');
+            const idInput = document.getElementById('add-cam-id');
+            const form = document.getElementById('form-add-cctv');
+            const resBox = document.getElementById('add-cam-test-result');
+
+            if (resBox) {
+                resBox.classList.add('hidden');
+                resBox.innerHTML = '';
+            }
+
+            let camData = null;
+            if (typeof targetCam === 'string') {
+                camData = currentCctvList.find(c => c.id === targetCam) || null;
+            } else if (typeof targetCam === 'object' && targetCam !== null) {
+                camData = targetCam;
+            }
+
+            if (camData) {
+                if (titleEl) titleEl.textContent = 'Edit Konfigurasi Kamera';
+                if (btnText) btnText.textContent = 'Simpan Perubahan';
+                if (idInput) idInput.value = camData.id;
+                document.getElementById('add-cam-name').value = camData.name || '';
+                document.getElementById('add-cam-brand').value = camData.brand || 'Tapo C200 / ONVIF PTZ';
+                document.getElementById('add-cam-ip').value = camData.ip || '';
+                document.getElementById('add-cam-port').value = camData.port || 2020;
+                document.getElementById('add-cam-rtsp-port').value = camData.rtsp_port || 554;
+                document.getElementById('add-cam-user').value = camData.user || '';
+                document.getElementById('add-cam-pass').value = camData.pass || '';
+                document.getElementById('add-cam-oid').value = camData.oid || '';
+            } else {
+                if (titleEl) titleEl.textContent = 'Tambah Device CCTV Baru';
+                if (btnText) btnText.textContent = 'Simpan & Aktifkan';
+                if (idInput) idInput.value = '';
+                if (form) form.reset();
+                document.getElementById('add-cam-port').value = '2020';
+                document.getElementById('add-cam-rtsp-port').value = '554';
+            }
+
             if (modal) {
                 modal.classList.remove('hidden');
                 modal.classList.add('flex');
-                document.getElementById('add-cam-test-result').classList.add('hidden');
             }
             if (typeof lucide !== 'undefined') lucide.createIcons();
         }
@@ -1347,6 +1386,15 @@
                 modal.classList.add('hidden');
                 modal.classList.remove('flex');
             }
+            const form = document.getElementById('form-add-cctv');
+            if (form) form.reset();
+            const idInput = document.getElementById('add-cam-id');
+            if (idInput) idInput.value = '';
+        }
+
+        function editCctvCamera(camId) {
+            closeManageCamerasModal();
+            openAddCameraModal(camId);
         }
 
         function openManageCamerasModal() {
@@ -1406,7 +1454,7 @@
                 .catch(err => console.error("Error loading CCTV devices:", err));
         }
 
-        // Ganti Kamera Aktif dari Dropdown
+        // Ganti Kamera Aktif dari Dropdown atau Modal
         function onSelectCamera(camId) {
             fetch('/api/cctv-devices/switch/' + camId, { method: 'POST' })
                 .then(res => res.json())
@@ -1414,6 +1462,10 @@
                     if (data.status === 'success' && data.active) {
                         currentActiveCctv = data.active;
                         
+                        // Sinkronkan pilihan pada dropdown di atas stream
+                        const select = document.getElementById('cctv-camera-select');
+                        if (select) select.value = currentActiveCctv.id;
+
                         // Update Subtitle
                         const sub = document.getElementById('cctv-active-subtitle');
                         if (sub) {
@@ -1469,6 +1521,12 @@
                         </div>
                     </div>
                     <div class="flex items-center gap-2 self-end sm:self-center">
+                        <button onclick="editCctvCamera('${cam.id}')" 
+                                class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-mono font-semibold border border-white/10 transition-all flex items-center gap-1.5 active:scale-95"
+                                title="Edit Pengaturan Kamera">
+                            <i data-lucide="edit-3" class="w-3.5 h-3.5 text-cyan-400"></i>
+                            Edit
+                        </button>
                         ${!isActive ? `
                             <button onclick="onSelectCamera('${cam.id}'); closeManageCamerasModal();" 
                                     class="px-3 py-1.5 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 rounded-xl text-xs font-mono font-bold border border-cyan-500/30 transition-all active:scale-95">
@@ -1530,10 +1588,18 @@
             });
         }
 
-        // Submit Form Tambah Kamera
+        // Submit Form Tambah / Edit Kamera
         function submitAddCameraForm(e) {
             e.preventDefault();
 
+            const saveBtn = document.getElementById('btn-save-cam');
+            const saveText = document.getElementById('btn-save-cam-text');
+            const originalText = saveText ? saveText.textContent : 'Simpan & Aktifkan';
+
+            if (saveBtn) saveBtn.disabled = true;
+            if (saveText) saveText.textContent = 'Menyimpan...';
+
+            const camId = document.getElementById('add-cam-id').value.trim();
             const payload = {
                 name: document.getElementById('add-cam-name').value.trim(),
                 brand: document.getElementById('add-cam-brand').value,
@@ -1544,6 +1610,9 @@
                 pass: document.getElementById('add-cam-pass').value.trim(),
                 oid: document.getElementById('add-cam-oid').value.trim()
             };
+            if (camId) {
+                payload.id = camId;
+            }
 
             fetch('/api/cctv-devices', {
                 method: 'POST',
@@ -1555,22 +1624,24 @@
                 if (data.status === 'success') {
                     showCctvToast(data.message, 'success');
                     closeAddCameraModal();
-                    document.getElementById('form-add-cctv').reset();
                     loadCctvDevices();
 
-                    // Update live stream langsung
+                    // Update live stream jika kamera aktif
                     if (data.device && isCameraPowerOn) {
                         currentActiveCctv = data.device;
-                        const img = document.getElementById('real-agentdvr-stream');
-                        if (img) img.src = data.device.stream_url + '&t=' + Date.now();
+                        updateStreamDisplay();
                     }
                 } else {
-                    showCctvToast(data.message || 'Gagal menambahkan kamera!', 'error');
+                    showCctvToast(data.message || 'Gagal menyimpan kamera!', 'error');
                 }
             })
             .catch(err => {
-                console.error("Error adding camera:", err);
+                console.error("Error adding/updating camera:", err);
                 showCctvToast("Terjadi kesalahan saat menyimpan kamera!", "error");
+            })
+            .finally(() => {
+                if (saveBtn) saveBtn.disabled = false;
+                if (saveText) saveText.textContent = originalText;
             });
         }
 
