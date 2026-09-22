@@ -1,58 +1,159 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <ESPAsyncWebServer.h>
+#include <WiFiMulti.h>
+#include <PubSubClient.h>
 #include <ESP32Servo.h>
 
-// =========================================================================
-// I. KONFIGURASI WIFI
-// =========================================================================
-const char* ssid     = "Kost Jelbie Lt 2"; 
-const char* password = "wlan47d147"; 
+WiFiMulti wifiMulti;
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
 
 // =========================================================================
-// II. INISIALISASI HARDWARE SERVO ALAT KEDUA
+// I. KONFIGURASI WIFI & IP STATIS TETAP (BENGKEL & KOST) - ALAT 2 (IP .151)
+// =========================================================================
+// Jaringan 1: Bengkel Mekanik (Subnet 10.32.72.x) - IP .151
+IPAddress ip_bengkel(10, 32, 72, 151);
+IPAddress gw_bengkel(10, 32, 72, 1);
+IPAddress subnet_bengkel(255, 255, 255, 0);
+
+// Jaringan 2: Kost Jelbie (Subnet 192.168.1.x) - IP .151
+IPAddress ip_kost(192, 168, 1, 151);
+IPAddress gw_kost(192, 168, 1, 1);
+IPAddress subnet_kost(255, 255, 255, 0);
+
+IPAddress dns(8, 8, 8, 8);
+
+// =========================================================================
+// II. KONFIGURASI MQTT BROKER
+// =========================================================================
+const char* mqtt_server = "48.193.45.137"; // Azure VPS
+const int   mqtt_port   = 1883;
+const char* mqtt_topic  = "lab/lampu2";
+
+unsigned long lastMqttReconnectAttempt = 0;
+
+// =========================================================================
+// III. INISIALISASI HARDWARE SERVO LAMPU 2
 // =========================================================================
 Servo servoSaklar2;
 
-const int SERVO_PIN     = 18;  // Menggunakan GPIO 18 sesuai rangkaian fisikmu
+// PIN SERVO: GPIO 13 (D13)
+const int SERVO_PIN     = 13; 
 
-// --- KALIBRASI SUDUT TEKAN (Sudut disesuaikan agar menekan lebih dalam) ---
-const int POSISI_NETRAL = 90;  // Posisi Siaga / Standby Tegak
-const int POSISI_ON     = 30;  // Sudut memutar ke satu arah untuk ON (Bisa dibalik ke 150 jika terbalik)
-const int POSISI_OFF    = 150; // Sudut memutar ke arah sebaliknya untuk OFF (Bisa dibalik ke 30 jika terbalik)
+// --- KALIBRASI SUDUT SAKLAR ---
+const int POSISI_NETRAL = 90;  // Posisi Standby Tegak Netral (90 Derajat)
+const int POSISI_ON     = 30;  // Sudut Menekan ON
+const int POSISI_OFF    = 150; // Sudut Menekan OFF
 
-// Variabel Antrean Sinyal Non-Blocking
-volatile int targetSudut = -1; 
-
-AsyncWebServer server(80);
+volatile int   targetSudut         = -1; 
+int            statusSudutTerakhir = -1;
+unsigned long  waktuEksekusiTerakhir = 0;
 
 // =========================================================================
-// III. FUNGSI EKSEKUSI GERAKAN SERVO
+// IV. FUNGSI PENSUKSER GERAKAN: TEKAN -> KEMBALI NETRAL SEMPURNA -> DETACH
 // =========================================================================
-void eksekusiSaklar(int sudut) {
-  Serial.print("[ALAT 2] Memulai Putaran ke Sudut: ");
-  Serial.println(sudut);
+void eksekusiSaklar(int sudutSasaran) {
+  // Proteksi Debounce 1.5 Detik
+  if (sudutSasaran == statusSudutTerakhir && (millis() - waktuEksekusiTerakhir < 1500)) {
+    return;
+  }
+  
+  statusSudutTerakhir = sudutSasaran;
+  waktuEksekusiTerakhir = millis();
 
-  // Attach sinyal PWM ke pin servo
+  Serial.println("\n==========================================");
+  Serial.printf("[SERVO 2] 1. Menekan Saklar ke Sudut: %d Deg\n", sudutSasaran);
+
+  // 1. Hubungkan sinyal PWM ke GPIO 13
   servoSaklar2.attach(SERVO_PIN, 500, 2400);
-  delay(100); 
-  
-  // 1. Putar servo ke sudut target (ON / OFF)
-  servoSaklar2.write(sudut);
-  delay(800); // Tahan 0.8 detik agar saklar fisik tertekan "klik"
-  
-  // 2. Kembalikan lengan servo ke posisi netral agar tidak terus menekan saklar
-  Serial.println("[ALAT 2] Kembali ke Posisi Netral (90 Deg)");
-  servoSaklar2.write(POSISI_NETRAL); 
-  delay(500); 
-  
-  // 3. Matikan sinyal PWM agar motor servo dingin & hemat daya
+  servoSaklar2.write(POSISI_NETRAL);
+  delay(60);
+
+  // 2. Putar motor untuk menekan saklar fisik
+  servoSaklar2.write(sudutSasaran);
+  delay(380); // Waktu tekan mantap
+
+  // 3. Kembalikan ke posisi netral (90 derajat)
+  Serial.println("[SERVO 2] 2. Memutar Balik Kembali ke Posisi Netral (90 Deg)...");
+  servoSaklar2.write(POSISI_NETRAL);
+  delay(450); // Waktu yang cukup untuk sampai di titik netral 90°
+
+  // 4. Putuskan sinyal PWM
   servoSaklar2.detach();
-  Serial.println("[ALAT 2] Selesai & Detached.\n");
+  pinMode(SERVO_PIN, OUTPUT);
+  digitalWrite(SERVO_PIN, LOW); // Tarik ke 0V
+  
+  Serial.println("[SERVO 2] 3. Selesai di Posisi Netral & Detached (Siaga Aman).\n");
+  Serial.println("==========================================\n");
 }
 
 // =========================================================================
-// IV. SETUP PROGRAM
+// V. CALLBACK MQTT (MENDENGARKAN PESAN DARI TOPIK 'lab/lampu2')
+// =========================================================================
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String message = "";
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  message.trim();
+  message.toUpperCase();
+
+  Serial.println("\n------------------------------------------");
+  Serial.printf("[MQTT INCOMING] Topik: %s | Pesan: %s\n", topic, message.c_str());
+
+  if (String(topic) == mqtt_topic) {
+    if (message == "ON" || message == "1") {
+      Serial.println("[MQTT] Perintah ON Diterima -> Jadwalkan Putar ke POSISI_ON (30 Deg)");
+      targetSudut = POSISI_ON;
+    } 
+    else if (message == "OFF" || message == "0") {
+      Serial.println("[MQTT] Perintah OFF Diterima -> Jadwalkan Putar ke POSISI_OFF (150 Deg)");
+      targetSudut = POSISI_OFF;
+    } 
+    else {
+      Serial.printf("[MQTT] Perintah '%s' tidak valid! Hanya menerima ON / OFF.\n", message.c_str());
+    }
+  }
+  Serial.println("------------------------------------------");
+}
+
+// =========================================================================
+// VI. RECONNECT MQTT OTOMATIS (NON-BLOCKING)
+// =========================================================================
+void reconnectMQTT() {
+  unsigned long now = millis();
+  // Coba hubungkan kembali setiap 5 detik jika koneksi terputus
+  if (now - lastMqttReconnectAttempt > 5000 || lastMqttReconnectAttempt == 0) {
+    lastMqttReconnectAttempt = now;
+
+    Serial.print("[MQTT] Menghubungkan ke Broker ");
+    Serial.print(mqtt_server);
+    Serial.print(":");
+    Serial.print(mqtt_port);
+    Serial.print("... ");
+
+    // Buat Client ID unik berdasarkan MAC Address ESP32
+    String clientId = "ESP32-Lampu2-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+
+    if (mqttClient.connect(clientId.c_str())) {
+      Serial.println("BERHASIL TERHUBUNG!");
+      
+      // Subscribe ke topik 'lab/lampu2'
+      mqttClient.subscribe(mqtt_topic);
+      Serial.printf("[MQTT] Berhasil Subscribe ke Topik: %s\n", mqtt_topic);
+      
+      // Kirim status online (opsional)
+      mqttClient.publish("lab/lampu2/status", "ONLINE", true);
+    } else {
+      Serial.print("GAGAL, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" (Akan mencoba lagi dalam 5 detik)");
+    }
+  }
+}
+
+// =========================================================================
+// VII. SETUP PROGRAM
 // =========================================================================
 void setup() {
   Serial.begin(115200);
@@ -62,56 +163,70 @@ void setup() {
   ESP32PWM::allocateTimer(1);
   servoSaklar2.setPeriodHertz(50);
 
-  // 1. Menghubungkan ke Wi-Fi Kost
-  Serial.println();
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
+  // Pastikan pin servo MATI TOTAL saat booting awal
+  pinMode(SERVO_PIN, OUTPUT);
+  digitalWrite(SERVO_PIN, LOW);
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+  // 1. Daftarkan SSID & Password Wi-Fi
+  wifiMulti.addAP("Bengkel Mekanik", "bengkel24");
+  wifiMulti.addAP("Kost Jelbie Lt 2", "wlan47d147");
+
+  Serial.println("\n[ESP32] Menghubungkan ke Wi-Fi...");
+  while (wifiMulti.run() != WL_CONNECTED) {
+    delay(300);
     Serial.print(".");
   }
 
+  // 2. Atur Static IP SETELAH Wi-Fi terhubung sesuai dengan SSID aktif (IP .151)
+  String currentSSID = WiFi.SSID();
+  if (currentSSID == "Bengkel Mekanik") {
+    WiFi.config(ip_bengkel, gw_bengkel, subnet_bengkel, dns);
+  } else if (currentSSID == "Kost Jelbie Lt 2") {
+    WiFi.config(ip_kost, gw_kost, subnet_kost, dns);
+  }
+
   Serial.println("\n==========================================");
-  Serial.println("  ESP32 ALAT KEDUA BERHASIL TERHUBUNG!");
-  Serial.print("  IP Address: http://");
-  Serial.println(WiFi.localIP()); // <-- CATAT IP ALAT KEDUA INI DI LAREVEL!
-  Serial.println("==========================================");
+  Serial.println("    ESP32 LAMPU 2 ONLINE (MQTT CLIENT)   ");
+  Serial.print("  Wi-Fi Terhubung : ");
+  Serial.println(WiFi.SSID());
+  Serial.print("  IP Address      : ");
+  Serial.println(WiFi.localIP());
+  Serial.print("  MQTT Broker     : ");
+  Serial.println(mqtt_server);
+  Serial.print("  Topik Kontrol   : ");
+  Serial.println(mqtt_topic);
+  Serial.println("  Status Servo    : Siaga Diam (GPIO 13)");
+  Serial.println("==========================================\n");
 
-  // -----------------------------------------------------------------------
-  // API ROUTING ENDPOINTS KHUSUS ALAT KEDUA
-  // -----------------------------------------------------------------------
-  
-  // Endpoint Nyalakan Lampu 2: http://<IP_ALAT_2>/lampu2/on
-  server.on("/lampu2/on", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.println("\n[API] Received Request: Lampu 2 ON");
-    targetSudut = POSISI_ON; // Oper target ke loop utama
-    request->send(200, "text/plain", "Lampu 2 Berhasil Menyala!");
-  });
+  // 3. Konfigurasi Client MQTT
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(mqttCallback);
 
-  // Endpoint Matikan Lampu 2: http://<IP_ALAT_2>/lampu2/off
-  server.on("/lampu2/off", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.println("\n[API] Received Request: Lampu 2 OFF");
-    targetSudut = POSISI_OFF; // Oper target ke loop utama
-    request->send(200, "text/plain", "Lampu 2 Berhasil Dimatikan!");
-  });
-
-  server.begin();
-  Serial.println("Web Server ESP32 Alat 2 Aktif & Siap!");
+  // Upayakan koneksi awal ke broker
+  reconnectMQTT();
 }
 
 // =========================================================================
-// V. LOOP UTAMA
+// VIII. LOOP UTAMA
 // =========================================================================
 void loop() {
-  // Mengeksekusi gerakan servo dengan aman di luar callback web server
-  if (targetSudut != -1) {
-    int sudutYangDieksekusi = targetSudut;
-    targetSudut = -1; // Reset flag antrean
-    
-    eksekusiSaklar(sudutYangDieksekusi);
+  // 1. Pastikan Wi-Fi tetap terhubung
+  if (wifiMulti.run() != WL_CONNECTED) {
+    delay(100);
+    return;
   }
-  
-  delay(10);
+
+  // 2. Jaga koneksi MQTT Broker tetap aktif
+  if (!mqttClient.connected()) {
+    reconnectMQTT();
+  } else {
+    mqttClient.loop();
+  }
+
+  // 3. Eksekusi Gerakan Servo jika ada target sudut baru dari MQTT
+  if (targetSudut != -1) {
+    int sudut = targetSudut;
+    targetSudut = -1; // Reset target agar tidak berulang
+    eksekusiSaklar(sudut);
+  }
 }
