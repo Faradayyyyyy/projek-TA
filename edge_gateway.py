@@ -128,6 +128,7 @@ def sync_active_camera(cam):
 def run_gateway(vps_url):
     vps_url = vps_url.rstrip('/')
     current_oid = "4"
+    current_cam_id = ""
     agent_dvr_snapshot_url = f"http://localhost:8090/grab.jpg?oid={current_oid}"
     upload_url = f"{vps_url}/api/cctv/upload-frame?oid={current_oid}"
     poll_url = f"{vps_url}/api/hardware/poll"
@@ -145,11 +146,18 @@ def run_gateway(vps_url):
         dev_res = session.get(f"{vps_url}/api/cctv-devices", timeout=2.0)
         if dev_res.status_code == 200:
             dev_data = dev_res.json()
-            active_cam = dev_data.get("active")
+            if isinstance(dev_data, list):
+                active_cam = dev_data[0] if len(dev_data) > 0 else None
+            elif isinstance(dev_data, dict):
+                active_cam = dev_data.get("active") or (dev_data.get("devices", [None])[0] if dev_data.get("devices") else None)
+            else:
+                active_cam = None
+
             if active_cam:
                 current_oid = str(active_cam.get("oid") or "4")
+                current_cam_id = str(active_cam.get("id") or "")
                 agent_dvr_snapshot_url = f"http://localhost:8090/grab.jpg?oid={current_oid}"
-                upload_url = f"{vps_url}/api/cctv/upload-frame?oid={current_oid}"
+                upload_url = f"{vps_url}/api/cctv/upload-frame?oid={current_oid}&cam_id={current_cam_id}"
                 sync_active_camera(active_cam)
                 print(f"[*] Kamera Aktif Awal: {active_cam.get('name', 'CCTV')} (OID {current_oid} | IP {active_cam.get('ip')})")
     except Exception:
@@ -187,11 +195,13 @@ def run_gateway(vps_url):
                             active_cam = resp_data.get("active_camera")
                             if active_cam:
                                 new_oid = str(active_cam.get("oid") or "4")
+                                new_cam_id = str(active_cam.get("id") or "")
                                 if new_oid != current_oid:
                                     print(f"\n[*] Beralih ke Kamera: {active_cam.get('name', 'CCTV')} (OID {new_oid} | IP {active_cam.get('ip')})")
                                     current_oid = new_oid
+                                    current_cam_id = new_cam_id
                                     agent_dvr_snapshot_url = f"http://localhost:8090/grab.jpg?oid={current_oid}"
-                                    upload_url = f"{vps_url}/api/cctv/upload-frame?oid={current_oid}"
+                                    upload_url = f"{vps_url}/api/cctv/upload-frame?oid={current_oid}&cam_id={current_cam_id}"
                                 sync_active_camera(active_cam)
                         except Exception:
                             pass

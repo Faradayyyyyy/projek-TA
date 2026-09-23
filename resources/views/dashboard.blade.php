@@ -1415,24 +1415,25 @@
             }
         }
 
-        // Muat Daftar Kamera dari Server
+        // Muat Daftar Kamera dari Server (Database)
         function loadCctvDevices() {
             fetch('/api/cctv-devices')
                 .then(res => res.json())
                 .then(data => {
-                    if (data.status === 'success' && data.devices) {
-                        currentCctvList = data.devices;
-                        currentActiveCctv = data.active || data.devices[0];
+                    const devices = Array.isArray(data) ? data : (data.devices || []);
+                    if (devices && devices.length > 0) {
+                        currentCctvList = devices;
+                        currentActiveCctv = (data && data.active) || devices[0];
 
-                        // Update Dropdown Selector
+                        // Update Dropdown Selector dari data database
                         const select = document.getElementById('cctv-camera-select');
                         if (select) {
                             select.innerHTML = '';
-                            data.devices.forEach(cam => {
+                            devices.forEach(cam => {
                                 const opt = document.createElement('option');
                                 opt.value = cam.id;
                                 opt.textContent = cam.name;
-                                if (currentActiveCctv && cam.id === currentActiveCctv.id) {
+                                if (currentActiveCctv && (cam.id == currentActiveCctv.id || cam.oid == currentActiveCctv.oid)) {
                                     opt.selected = true;
                                 }
                                 select.appendChild(opt);
@@ -1443,7 +1444,7 @@
                         if (currentActiveCctv) {
                             const sub = document.getElementById('cctv-active-subtitle');
                             if (sub) {
-                                sub.innerHTML = `${currentActiveCctv.brand || 'IP Camera'} &bull; IP: <span class="text-cyan-400 font-bold">${currentActiveCctv.ip}</span> (Port ${currentActiveCctv.port || 2020})`;
+                                sub.innerHTML = `${currentActiveCctv.brand || currentActiveCctv.description || 'IP Camera'} &bull; IP: <span class="text-cyan-400 font-bold">${currentActiveCctv.ip}</span> (Port ${currentActiveCctv.port || currentActiveCctv.onvif_port || 2020})`;
                             }
                         }
 
@@ -1454,34 +1455,40 @@
                 .catch(err => console.error("Error loading CCTV devices:", err));
         }
 
-        // Ganti Kamera Aktif dari Dropdown atau Modal
+        // Ganti Kamera Aktif dari Dropdown atau Modal (Tanpa reload halaman)
         function onSelectCamera(camId) {
+            const foundCam = currentCctvList.find(c => c.id == camId || c.oid == camId);
+            if (foundCam) {
+                currentActiveCctv = foundCam;
+            }
+
             fetch('/api/cctv-devices/switch/' + camId, { method: 'POST' })
                 .then(res => res.json())
                 .then(data => {
                     if (data.status === 'success' && data.active) {
                         currentActiveCctv = data.active;
-                        
-                        // Sinkronkan pilihan pada dropdown di atas stream
-                        const select = document.getElementById('cctv-camera-select');
-                        if (select) select.value = currentActiveCctv.id;
-
-                        // Update Subtitle
-                        const sub = document.getElementById('cctv-active-subtitle');
-                        if (sub) {
-                            sub.innerHTML = `${currentActiveCctv.brand || 'IP Camera'} &bull; IP: <span class="text-cyan-400 font-bold">${currentActiveCctv.ip}</span> (Port ${currentActiveCctv.port || 2020})`;
-                        }
-
-                        // Update Live Stream Video Frame
-                        updateStreamDisplay();
-
-                        // Tampilkan Notifikasi Toast
-                        showCctvToast(`Beralih ke Kamera: ${currentActiveCctv.name}`, 'success');
                     }
                 })
                 .catch(err => {
-                    console.error("Error switching camera:", err);
-                    showCctvToast("Gagal beralih kamera!", "error");
+                    console.warn("Notice switching camera:", err);
+                })
+                .finally(() => {
+                    // Sinkronkan pilihan pada dropdown di atas stream
+                    const select = document.getElementById('cctv-camera-select');
+                    if (select && currentActiveCctv) select.value = currentActiveCctv.id;
+
+                    // Update Subtitle
+                    const sub = document.getElementById('cctv-active-subtitle');
+                    if (sub && currentActiveCctv) {
+                        sub.innerHTML = `${currentActiveCctv.brand || currentActiveCctv.description || 'IP Camera'} &bull; IP: <span class="text-cyan-400 font-bold">${currentActiveCctv.ip}</span> (Port ${currentActiveCctv.port || currentActiveCctv.onvif_port || 2020})`;
+                    }
+
+                    // Update Live Stream Video Frame LANGSUNG tanpa reload halaman
+                    updateStreamDisplay();
+
+                    if (currentActiveCctv) {
+                        showCctvToast(`Beralih ke Kamera: ${currentActiveCctv.name}`, 'success');
+                    }
                 });
         }
 
