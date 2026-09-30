@@ -263,11 +263,12 @@
                         </div>
                     </div>
 
-                    <!-- Video Frame (100% Full Pure Live Feed) -->
-                    <div id="cctv-container" class="relative w-full aspect-video bg-black rounded-xl overflow-hidden border border-cyan-500/30 shadow-2xl flex items-center justify-center">
+                    <!-- Video Frame (100% Full Pure Live Feed - 16:9 Uncropped HD) -->
+                    <div id="cctv-container" class="relative w-full aspect-video bg-[#0f172a] rounded-xl overflow-hidden border border-cyan-500/30 shadow-2xl flex items-center justify-center" style="background-color: #0f172a; overflow: hidden; display: flex; align-items: center; justify-content: center;">
                         <img id="real-agentdvr-stream"
                              src="" 
-                             class="w-full h-full object-cover transition-opacity duration-300"
+                             class="w-full h-auto max-h-full object-contain transition-opacity duration-300 border-0 outline-none"
+                             style="width: 100%; height: auto; max-height: 100%; object-fit: contain; border: none; outline: none;"
                              alt="Live CCTV Feed"
                              onerror="handleStreamError()">
 

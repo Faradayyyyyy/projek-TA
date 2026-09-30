@@ -152,10 +152,10 @@
                     </div>
 
                     <!-- Video Container -->
-                    <div class="relative w-full aspect-video bg-black rounded-xl overflow-hidden border border-white/10 group shadow-2xl">
-                        <div class="absolute inset-0 w-full h-full opacity-80 overflow-hidden bg-slate-900">
+                    <div class="relative w-full aspect-video bg-[#0f172a] rounded-xl overflow-hidden border border-white/10 group shadow-2xl flex items-center justify-center" style="background-color: #0f172a; overflow: hidden; display: flex; align-items: center; justify-content: center;">
+                        <div class="absolute inset-0 w-full h-full opacity-80 overflow-hidden bg-slate-900 flex items-center justify-center">
                             <img src="https://images.unsplash.com/photo-1550751827-4bd374c3f58b?auto=format&fit=crop&q=80&w=2070" 
-                                 class="w-full h-full object-cover animate-[cctv-pan_20s_ease-in-out_infinite_alternate] filter grayscale contrast-125 brightness-75" alt="CCTV Stream">
+                                 class="w-full h-auto max-h-full object-contain filter grayscale contrast-125 brightness-75" style="width: 100%; height: auto; max-height: 100%; object-fit: contain;" alt="CCTV Stream">
                             <div class="absolute inset-0 opacity-20 pointer-events-none" style="background-image: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.5) 2px, rgba(0,0,0,0.5) 4px);"></div>
                         </div>
 
