@@ -1344,10 +1344,41 @@
                 return;
             }
 
-            const activeOid = getActiveOid();
+            // 1. Baca nilai OID/ID dari dropdown pilihan kamera yang sedang aktif saat itu
+            const selectedOid = getActiveOid();
 
-            // Eksekusi Driver ONVIF Python Langsung & Agent DVR via backend Laravel
-            fetch(`/api/cctv-ptz/${command}?oid=${activeOid}`).catch(() => {});
+            // 2. Kirimkan payload POST ke API kontrol hardware dengan menyertakan oid kamera dan arah action
+            const ptzPayload = {
+                type: "ptz",
+                oid: selectedOid,
+                action: command
+            };
+
+            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
+            // Kirim ke endpoint resmi POST /api/hardware/control
+            fetch('/api/hardware/control', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken
+                },
+                body: JSON.stringify(ptzPayload)
+            }).catch(err => {
+                console.warn("Notice sending hardware control:", err);
+            });
+
+            // Juga kirimkan ke endpoint log aktivitas /api/control
+            fetch('/api/control', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken
+                },
+                body: JSON.stringify(ptzPayload)
+            }).catch(() => {});
 
             const labels = {
                 'up': 'Putar Atas',
@@ -1363,7 +1394,7 @@
             const toast = document.createElement('div');
             toast.id = 'ptz-toast';
             toast.className = 'fixed bottom-6 right-6 px-4 py-3 bg-slate-900/90 backdrop-blur-md border border-cyan-500/50 text-cyan-300 rounded-xl text-xs font-mono font-bold shadow-[0_0_25px_rgba(6,182,212,0.3)] z-50 flex items-center gap-2 animate-fade-in';
-            toast.innerHTML = `<i data-lucide="navigation" class="w-4 h-4 text-cyan-400"></i> PTZ: ${labels[command] || command}`;
+            toast.innerHTML = `<i data-lucide="navigation" class="w-4 h-4 text-cyan-400"></i> PTZ (${selectedOid}): ${labels[command] || command}`;
             document.body.appendChild(toast);
             if (typeof lucide !== 'undefined') lucide.createIcons();
 

@@ -258,46 +258,11 @@ Route::get('/api/logs', function () {
 // HELPER ANTRIAN PERINTAH HARDWARE CLOUD-TO-EDGE (ZERO DELAY)
 // =========================================================================
 function pushHardwareCommand($command) {
-    // 1. Simpan ke file queue di storage (Instan & aman untuk multi-proses / Linux VPS)
-    try {
-        $queueFile = storage_path('app/hardware_queue.json');
-        $queue = [];
-        if (file_exists($queueFile)) {
-            $queue = json_decode(@file_get_contents($queueFile), true) ?: [];
-        }
-        $queue[] = $command;
-        @file_put_contents($queueFile, json_encode(array_slice($queue, -30)));
-    } catch (\Exception $e) {}
-
-    // 2. Simpan juga ke Cache Laravel
-    try {
-        $cacheQueue = Cache::get('pending_hardware_queue', []);
-        $cacheQueue[] = $command;
-        Cache::put('pending_hardware_queue', array_slice($cacheQueue, -30), 120);
-    } catch (\Exception $e) {}
+    app(\App\Http\Controllers\CctvController::class)->pushHardwareCommand((array)$command);
 }
 
 function popHardwareCommands() {
-    $commands = [];
-    try {
-        $queueFile = storage_path('app/hardware_queue.json');
-        if (file_exists($queueFile)) {
-            $fileCommands = json_decode(@file_get_contents($queueFile), true) ?: [];
-            if (!empty($fileCommands)) {
-                $commands = array_merge($commands, $fileCommands);
-                @file_put_contents($queueFile, json_encode([]));
-            }
-        }
-    } catch (\Exception $e) {}
-
-    try {
-        $cacheCommands = Cache::pull('pending_hardware_queue', []);
-        if (!empty($cacheCommands)) {
-            $commands = array_merge($commands, $cacheCommands);
-        }
-    } catch (\Exception $e) {}
-
-    return $commands;
+    return app(\App\Http\Controllers\CctvController::class)->popHardwareCommands();
 }
 
 Route::post('/api/control', function (\Illuminate\Http\Request $request) {
@@ -324,7 +289,7 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
 
     if (isset($raw['lamp1'])) {
         Cache::put('lamp1', (int) $raw['lamp1'], 86400);
-        pushHardwareCommand(['type' => 'lamp1', 'state' => (int)$raw['lamp1'], 'time' => microtime(true)]);
+        pushHardwareCommand(['type' => 'lamp1', 'state' => (int)$raw['lamp1'], 'oid' => (string)($raw['oid'] ?? '4'), 'time' => microtime(true)]);
         try {
             app(\App\Http\Controllers\LampuController::class)->kontrolLampu1($request, $raw['lamp1'] == 1 ? 'ON' : 'OFF');
         } catch (\Throwable $e) {}
@@ -339,7 +304,7 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
     }
     if (isset($raw['lamp2'])) {
         Cache::put('lamp2', (int) $raw['lamp2'], 86400);
-        pushHardwareCommand(['type' => 'lamp2', 'state' => (int)$raw['lamp2'], 'time' => microtime(true)]);
+        pushHardwareCommand(['type' => 'lamp2', 'state' => (int)$raw['lamp2'], 'oid' => (string)($raw['oid'] ?? '4'), 'time' => microtime(true)]);
         try {
             app(\App\Http\Controllers\LampuController::class)->kontrolLampu2($request, $raw['lamp2'] == 1 ? 'ON' : 'OFF');
         } catch (\Throwable $e) {}
@@ -357,8 +322,10 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
             app(\App\Http\Controllers\LampuController::class)->kontrolServo($request, $raw['servo']);
         } catch (\Throwable $e) {}
     }
-    if (isset($raw['ptz']) || isset($raw['cctv'])) {
-        $ptzCmd = $raw['ptz'] ?? $raw['cctv'];
+    if (isset($raw['ptz']) || isset($raw['cctv']) || (isset($raw['type']) && $raw['type'] === 'ptz')) {
+        $ptzCmd = strtolower($raw['action'] ?? ($raw['ptz'] ?? ($raw['cctv'] ?? '')));
+        $targetOid = (string) ($raw['oid'] ?? ($request->query('oid', '4')));
+
         $directionNames = [
             'up' => 'Atas (Tilt Up)',
             'down' => 'Bawah (Tilt Down)',
@@ -380,12 +347,18 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
         $dirText = $directionNames[$ptzCmd] ?? strtoupper($ptzCmd);
         $ispyCmd = $ispyMap[$ptzCmd] ?? 'ispydir_4';
         
-        pushHardwareCommand(['type' => 'ptz', 'action' => $ptzCmd, 'oid' => 4, 'time' => microtime(true)]);
+        pushHardwareCommand([
+            'type' => 'ptz',
+            'action' => $ptzCmd,
+            'command' => $ptzCmd,
+            'oid' => $targetOid,
+            'time' => microtime(true)
+        ]);
 
         array_unshift($existingLogs, [
             'time' => $now,
             'user' => $user,
-            'action' => 'Menggerakkan Kamera CCTV ke Arah ' . $dirText,
+            'action' => 'Menggerakkan Kamera CCTV (OID ' . $targetOid . ') ke Arah ' . $dirText,
             'device' => 'IP Camera PTZ ONVIF (Agent DVR)',
             'param' => 'Protocol: ' . $ispyCmd,
             'status' => 'EXECUTED'
@@ -395,11 +368,13 @@ Route::post('/api/control', function (\Illuminate\Http\Request $request) {
         if (PHP_OS_FAMILY === 'Windows' || in_array(request()->getHost(), ['localhost', '127.0.0.1'])) {
             try {
                 $pyPath = str_replace('\\', '/', base_path('tapo_move.py'));
-                pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($ptzCmd) . " > nul 2>&1", "r"));
+                if ($targetOid === '4') {
+                    pclose(popen("start /B python \"{$pyPath}\" " . escapeshellarg($ptzCmd) . " > nul 2>&1", "r"));
+                }
             } catch (\Exception $e) {}
 
             try {
-                Illuminate\Support\Facades\Http::timeout(0.05)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid=4&ot=2");
+                Illuminate\Support\Facades\Http::timeout(0.05)->get("http://localhost:8090/q.json?cmd=ptzCommand&command={$ispyCmd}&oid={$targetOid}&ot=2");
             } catch (\Exception $e) {}
         }
     }
@@ -428,7 +403,9 @@ Route::delete('/api/cctv-devices/{id}', [App\Http\Controllers\CctvController::cl
 Route::post('/api/cctv-devices/test', [App\Http\Controllers\CctvController::class, 'testConnection']);
 Route::post('/api/cctv/upload-frame', [App\Http\Controllers\CctvController::class, 'uploadFrame']);
 Route::get('/api/cctv-snapshot', [App\Http\Controllers\CctvController::class, 'snapshot']);
-Route::get('/api/cctv-ptz/{command}', [App\Http\Controllers\CctvController::class, 'ptz']);
+Route::match(['get', 'post'], '/api/cctv-ptz/{command}', [App\Http\Controllers\CctvController::class, 'ptz']);
 Route::get('/api/cctv-power/{action}', [App\Http\Controllers\CctvController::class, 'power']);
+Route::get('/api/hardware/poll', [App\Http\Controllers\CctvController::class, 'pollHardwareCommands']);
+Route::post('/api/hardware/control', [App\Http\Controllers\CctvController::class, 'controlHardware']);
 
 require __DIR__.'/auth.php';

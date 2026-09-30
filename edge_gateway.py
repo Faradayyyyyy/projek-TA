@@ -50,17 +50,63 @@ def print_banner(vps_url):
 
 def execute_command_async(cmd):
     """Mengeksekusi perintah hardware secara non-blocking."""
+    if not isinstance(cmd, dict):
+        return
+
     cmd_type = cmd.get("type")
     
     if cmd_type == "ptz":
-        action = cmd.get("action")
-        print(f"\n[>>> KONTROL INSTAN] Memutar Kamera PTZ ke arah: {action.upper()}")
-        if has_ptz_driver:
-            try:
-                code, text = tapo_move.move_tapo(action)
-                print(f"[✓ KONTROL SELESAI] PTZ {action.upper()} dieksekusi (Status {code})")
-            except Exception as e:
-                print(f"[!] Gagal gerakkan kamera: {e}")
+        try:
+            target_oid = str(cmd.get("oid") or "").strip()
+            action = str(cmd.get("action") or cmd.get("command") or "").strip().lower()
+
+            if not action:
+                print("[!] Perintah PTZ diabaikan: parameter action kosong.")
+                return
+
+            # Default ke OID 4 jika target_oid tidak diberikan
+            if not target_oid:
+                target_oid = "4"
+
+            # 1. Jika target_oid adalah OID Kamera Tapo (misal OID 4): eksekusi via tapo_move.move_tapo(action)
+            if target_oid == "4":
+                print(f"\n[>>> KONTROL INSTAN TAPO C200] Memutar Kamera PTZ (OID {target_oid}) ke arah: {action.upper()}")
+                if has_ptz_driver:
+                    try:
+                        code, text = tapo_move.move_tapo(action)
+                        print(f"[OK KONTROL SELESAI] Tapo PTZ {action.upper()} dieksekusi (Status {code})")
+                    except Exception as e:
+                        print(f"[!] Gagal menggerakkan kamera Tapo: {e}")
+                else:
+                    print("[!] Driver tapo_move tidak tersedia di gateway ini.")
+
+            # 2. Jika target_oid adalah OID Kamera Agent DVR lainnya (misal OID 1 atau 2):
+            # Kirimkan perintah PTZ ke API Agent DVR lokal menggunakan HTTP request ke Agent DVR PTZ endpoint
+            else:
+                ispy_map = {
+                    'up': 'ispydir_1',
+                    'down': 'ispydir_7',
+                    'left': 'ispydir_3',
+                    'right': 'ispydir_5',
+                    'home': 'ispydir_4',
+                    'center': 'ispydir_4',
+                    'zoomin': 'ispydir_9',
+                    'zoomout': 'ispydir_10'
+                }
+                action_code = ispy_map.get(action, f"ispydir_{action}" if not action.startswith("ispy") else action)
+                agent_ptz_url = f"http://localhost:8090/ptz.aspx?oid={target_oid}&ot=2&command={action_code}"
+                print(f"\n[>>> KONTROL INSTAN AGENT DVR] Mengirim PTZ (OID {target_oid}, Action: {action.upper()}) -> {agent_ptz_url}")
+                try:
+                    resp = requests.get(agent_ptz_url, timeout=1.5)
+                    if resp.status_code != 200:
+                        q_url = f"http://localhost:8090/q.json?cmd=ptzCommand&command={action_code}&oid={target_oid}&ot=2"
+                        requests.get(q_url, timeout=1.5)
+                    print(f"[OK KONTROL SELESAI] Agent DVR PTZ (OID {target_oid}) {action.upper()} terkirim (Status {resp.status_code})")
+                except Exception as e:
+                    print(f"[!] Gagal mengirim PTZ ke Agent DVR lokal (OID {target_oid}): {e}")
+
+        except Exception as e:
+            print(f"[!] Terjadi kesalahan pada eksekusi PTZ: {e}")
                 
     elif cmd_type == "lamp1":
         state = cmd.get("state")
@@ -69,7 +115,7 @@ def execute_command_async(cmd):
         try:
             # Mengirim via client background yang sudah terhubung
             mqtt_client.publish("lab/lampu1", subcmd, qos=0)
-            print(f"[✓ KONTROL SELESAI] Lampu 1 {subcmd} terkirim instan (Topic: lab/lampu1)")
+            print(f"[OK KONTROL SELESAI] Lampu 1 {subcmd} terkirim instan (Topic: lab/lampu1)")
         except Exception as e:
             print(f"[!] Gagal kirim MQTT Lampu 1: {e}")
             
@@ -80,7 +126,7 @@ def execute_command_async(cmd):
         try:
             # Mengirim via client background yang sudah terhubung
             mqtt_client.publish("lab/lampu2", subcmd, qos=0)
-            print(f"[✓ KONTROL SELESAI] Lampu 2 {subcmd} terkirim instan (Topic: lab/lampu2)")
+            print(f"[OK KONTROL SELESAI] Lampu 2 {subcmd} terkirim instan (Topic: lab/lampu2)")
         except Exception as e:
             print(f"[!] Gagal kirim MQTT Lampu 2: {e}")
 

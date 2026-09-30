@@ -39,10 +39,16 @@ Route::post('/cctv/upload-frame', [CctvController::class, 'uploadFrame']);
 Route::get('/cctv-snapshot', [CctvController::class, 'snapshot']);
 
 // 8. Kontrol ONVIF PTZ Kamera Fisik
-Route::get('/cctv-ptz/{command}', [CctvController::class, 'ptz']);
+Route::match(['get', 'post'], '/cctv-ptz/{command}', [CctvController::class, 'ptz']);
 
 // 9. Kontrol Power On/Off Kamera
 Route::get('/cctv-power/{action}', [CctvController::class, 'power']);
+
+// 10. Polling Antrian Perintah Hardware untuk Edge Gateway (menghasilkan field oid, type, action)
+Route::get('/hardware/poll', [CctvController::class, 'pollHardwareCommands']);
+
+// 11. Kontrol Hardware Terpadu (PTZ per OID, Lampu) via POST JSON
+Route::post('/hardware/control', [CctvController::class, 'controlHardware']);
 
 // =========================================================================
 // API ENDPOINT KONTROL MQTT & HARDWARE

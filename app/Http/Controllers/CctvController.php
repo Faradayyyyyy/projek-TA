@@ -10,15 +10,83 @@ use Illuminate\Support\Facades\Http;
 class CctvController extends Controller
 {
     /**
-     * Helper: Ambil antrian perintah hardware (PTZ, Lampu) untuk diselipkan ke Edge Gateway
+     * Helper: Simpan perintah hardware (PTZ, Lampu) ke antrian
      */
-    private function popHardwareCommands(): array
+    public function pushHardwareCommand(array $command): void
     {
-        $queue = Cache::get('hardware_command_queue', []);
-        if (!empty($queue)) {
-            Cache::put('hardware_command_queue', [], 60);
+        // 1. Simpan ke file queue di storage
+        try {
+            $queueFile = storage_path('app/hardware_queue.json');
+            $queue = [];
+            if (file_exists($queueFile)) {
+                $queue = json_decode(@file_get_contents($queueFile), true) ?: [];
+            }
+            $queue[] = $command;
+            @file_put_contents($queueFile, json_encode(array_slice($queue, -50)));
+        } catch (\Throwable $e) {}
+
+        // 2. Simpan ke Cache Laravel
+        try {
+            $cacheQueue = Cache::get('hardware_command_queue', []);
+            $cacheQueue[] = $command;
+            Cache::put('hardware_command_queue', array_slice($cacheQueue, -50), 120);
+
+            $pendingQueue = Cache::get('pending_hardware_queue', []);
+            $pendingQueue[] = $command;
+            Cache::put('pending_hardware_queue', array_slice($pendingQueue, -50), 120);
+        } catch (\Throwable $e) {}
+    }
+
+    /**
+     * Helper: Ambil antrian perintah hardware (PTZ, Lampu) dengan field oid, type, dan action
+     */
+    public function popHardwareCommands(): array
+    {
+        $commands = [];
+
+        // 1. Ambil dari file queue storage
+        try {
+            $queueFile = storage_path('app/hardware_queue.json');
+            if (file_exists($queueFile)) {
+                $fileCommands = json_decode(@file_get_contents($queueFile), true) ?: [];
+                if (!empty($fileCommands)) {
+                    $commands = array_merge($commands, $fileCommands);
+                    @file_put_contents($queueFile, json_encode([]));
+                }
+            }
+        } catch (\Throwable $e) {}
+
+        // 2. Ambil dari Cache
+        try {
+            $cacheQueue = Cache::pull('hardware_command_queue', []);
+            if (!empty($cacheQueue)) {
+                $commands = array_merge($commands, $cacheQueue);
+            }
+            $pendingQueue = Cache::pull('pending_hardware_queue', []);
+            if (!empty($pendingQueue)) {
+                $commands = array_merge($commands, $pendingQueue);
+            }
+        } catch (\Throwable $e) {}
+
+        // Pastikan setiap command menyertakan field oid, type, dan action
+        $formatted = [];
+        foreach ($commands as $cmd) {
+            if (!is_array($cmd)) continue;
+            $type = $cmd['type'] ?? 'ptz';
+            $oid = (string) ($cmd['oid'] ?? '4');
+            $action = (string) ($cmd['action'] ?? ($cmd['command'] ?? ''));
+
+            $formatted[] = [
+                'type' => $type,
+                'oid' => $oid,
+                'action' => $action,
+                'command' => $action,
+                'state' => $cmd['state'] ?? null,
+                'time' => $cmd['time'] ?? microtime(true)
+            ];
         }
-        return $queue;
+
+        return $formatted;
     }
 
     /**
@@ -474,29 +542,36 @@ class CctvController extends Controller
     }
 
     /**
-     * 8. GET /api/cctv-ptz/{command}
+     * 8. GET|POST /api/cctv-ptz/{command}
      * Kontrol ONVIF PTZ Fisik
      */
     public function ptz($command, Request $request)
     {
-        $oid = $request->query('oid', 4);
+        $raw = $request->json()->all() ?: ($request->all() ?: (json_decode($request->getContent(), true) ?: []));
+        $oid = (string) ($raw['oid'] ?? ($request->query('oid') ?? ($request->input('oid', '4'))));
+        $action = strtolower($raw['action'] ?? $command);
 
-        $allowed = ['up', 'down', 'left', 'right', 'home'];
-        if (!in_array($command, $allowed)) {
+        $allowed = ['up', 'down', 'left', 'right', 'home', 'center', 'zoomin', 'zoomout'];
+        if (!in_array($action, $allowed)) {
             return response()->json(['status' => 'error', 'message' => 'Perintah tidak valid'], 400);
         }
 
-        // Catat ke antrian hardware
-        $queue = Cache::get('hardware_command_queue', []);
-        $queue[] = ['type' => 'ptz', 'command' => $command, 'oid' => $oid, 'time' => microtime(true)];
-        Cache::put('hardware_command_queue', array_slice($queue, -20), 60);
+        // Catat ke antrian hardware dengan field oid, type, dan action
+        $cmd = [
+            'type' => 'ptz',
+            'oid' => $oid,
+            'action' => $action,
+            'command' => $action,
+            'time' => microtime(true)
+        ];
+        $this->pushHardwareCommand($cmd);
 
         // Eksekusi lokal jika di server lokal Windows
         if (PHP_OS_FAMILY === 'Windows' || in_array(request()->getHost(), ['localhost', '127.0.0.1'])) {
             try {
                 $pyPath = base_path('tapo_move.py');
-                if (file_exists($pyPath)) {
-                    $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($command);
+                if (file_exists($pyPath) && $oid === '4') {
+                    $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($action);
                     pclose(popen("start /B " . $cmdExec, "r"));
                 }
             } catch (\Exception $e) {}
@@ -504,9 +579,11 @@ class CctvController extends Controller
 
         return response()->json([
             'status' => 'success',
-            'command' => $command,
+            'type' => 'ptz',
+            'action' => $action,
+            'command' => $action,
             'oid' => $oid,
-            'message' => "Perintah PTZ '{$command}' berhasil dikirim"
+            'message' => "Perintah PTZ '{$action}' untuk kamera OID {$oid} berhasil dikirim"
         ]);
     }
 
@@ -516,13 +593,17 @@ class CctvController extends Controller
      */
     public function power($action, Request $request)
     {
-        $oid = $request->query('oid', 4);
+        $oid = (string) ($request->query('oid') ?? ($request->input('oid', '4')));
         $isOn = ($action === 'on');
         $agentCmd = $isOn ? 'switchon' : 'switchoff';
 
-        $queue = Cache::get('hardware_command_queue', []);
-        $queue[] = ['type' => 'power', 'action' => $action, 'oid' => $oid, 'time' => microtime(true)];
-        Cache::put('hardware_command_queue', array_slice($queue, -20), 60);
+        $cmd = [
+            'type' => 'power',
+            'action' => $action,
+            'oid' => $oid,
+            'time' => microtime(true)
+        ];
+        $this->pushHardwareCommand($cmd);
 
         if (PHP_OS_FAMILY === 'Windows' || in_array(request()->getHost(), ['localhost', '127.0.0.1'])) {
             try {
@@ -536,5 +617,86 @@ class CctvController extends Controller
             'oid' => $oid,
             'message' => "Kamera (OID: {$oid}) berhasil di-" . ($isOn ? 'aktifkan' : 'non-aktifkan')
         ]);
+    }
+
+    /**
+     * 10. GET /api/hardware/poll
+     * Endpoint polling hardware untuk Edge Gateway (mengembalikan field oid, type, action)
+     */
+    public function pollHardwareCommands(Request $request)
+    {
+        $commands = $this->popHardwareCommands();
+
+        return response()->json([
+            'status' => 'success',
+            'commands' => $commands,
+            'count' => count($commands),
+            'timestamp' => microtime(true)
+        ]);
+    }
+
+    /**
+     * 11. POST /api/hardware/control
+     * Menerima payload POST { "type": "ptz", "oid": selectedOid, "action": "up" }
+     */
+    public function controlHardware(Request $request)
+    {
+        $raw = $request->json()->all() ?: ($request->all() ?: (json_decode($request->getContent(), true) ?: []));
+
+        $type = $raw['type'] ?? 'ptz';
+        $oid = (string) ($raw['oid'] ?? ($request->query('oid', '4')));
+        $action = strtolower((string) ($raw['action'] ?? ($raw['command'] ?? ($raw['ptz'] ?? ''))));
+
+        if ($type === 'ptz') {
+            if (!$action) {
+                return response()->json(['status' => 'error', 'message' => 'Parameter action wajib diisi'], 400);
+            }
+
+            $cmd = [
+                'type' => 'ptz',
+                'oid' => $oid,
+                'action' => $action,
+                'command' => $action,
+                'time' => microtime(true)
+            ];
+            $this->pushHardwareCommand($cmd);
+
+            // Eksekusi lokal jika di server lokal Windows
+            if (PHP_OS_FAMILY === 'Windows' || in_array(request()->getHost(), ['localhost', '127.0.0.1'])) {
+                try {
+                    $pyPath = base_path('tapo_move.py');
+                    if (file_exists($pyPath) && $oid === '4') {
+                        $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($action);
+                        pclose(popen("start /B " . $cmdExec, "r"));
+                    }
+                } catch (\Exception $e) {}
+            }
+
+            return response()->json([
+                'status' => 'success',
+                'message' => "Perintah PTZ {$action} (OID {$oid}) berhasil diantrikan",
+                'command' => $cmd
+            ]);
+        }
+
+        if (in_array($type, ['lamp1', 'lamp2'])) {
+            $state = isset($raw['state']) ? (int) $raw['state'] : ($action === 'on' ? 1 : 0);
+            $cmd = [
+                'type' => $type,
+                'state' => $state,
+                'oid' => $oid,
+                'action' => $state === 1 ? 'on' : 'off',
+                'time' => microtime(true)
+            ];
+            $this->pushHardwareCommand($cmd);
+
+            return response()->json([
+                'status' => 'success',
+                'message' => "Perintah {$type} berhasil diantrikan",
+                'command' => $cmd
+            ]);
+        }
+
+        return response()->json(['status' => 'error', 'message' => 'Tipe perintah tidak dikenali'], 400);
     }
 }
