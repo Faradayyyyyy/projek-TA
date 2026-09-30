@@ -1085,14 +1085,19 @@
         let isCameraPowerOn = true;
         const isLocalClient = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
         let currentStreamMode = localStorage.getItem('cctv_stream_mode') || (isLocalClient ? 'direct' : 'proxy');
-        let snapshotLoopActive = false;
-        let snapshotTimeout = null;
+        let cctvStreamInterval = null; // Menyimpan ID interval aktif untuk me-refresh tag <img>
+        let currentSelectedOid = '4';
 
         function getActiveOid() {
             if (currentActiveCctv && currentActiveCctv.oid) {
-                return currentActiveCctv.oid;
+                return String(currentActiveCctv.oid);
             }
-            return 4;
+            const select = document.getElementById('cctv-camera-select');
+            if (select && select.selectedOptions && select.selectedOptions[0]) {
+                const optOid = select.selectedOptions[0].getAttribute('data-oid');
+                if (optOid) return String(optOid);
+            }
+            return '4';
         }
 
         function getDirectStreamUrl(oid = null) {
@@ -1101,39 +1106,78 @@
             return `http://${host}:8090/video.mjpg?oid=${targetOid}`;
         }
 
-        function startProxyStream(oid = null) {
-            stopProxyStream();
+        // Hentikan interval lama jika ada sebelum memulai interval baru
+        function stopCctvStream() {
+            if (cctvStreamInterval) {
+                clearInterval(cctvStreamInterval);
+                cctvStreamInterval = null;
+            }
+        }
+
+        // Refresh tag <img> CCTV secara dinamis sesuai OID dengan interval baru
+        function startCctvStream(selectedOid = null) {
+            // 1. Pastikan interval JavaScript yang lama di-clear sebelum memulai interval baru
+            stopCctvStream();
+
             if (!isCameraPowerOn) return;
 
-            snapshotLoopActive = true;
-            const targetOid = oid !== null ? oid : getActiveOid();
-            const img = document.getElementById('real-agentdvr-stream');
-            if (!img) return;
+            currentSelectedOid = selectedOid !== null ? String(selectedOid) : getActiveOid();
+            const imgElement = document.getElementById('real-agentdvr-stream');
+            if (!imgElement) return;
 
-            function loadNextSnapshot() {
-                if (!snapshotLoopActive || !isCameraPowerOn) return;
-                const buffer = new Image();
-                buffer.onload = () => {
-                    if (!snapshotLoopActive || !isCameraPowerOn) return;
-                    img.src = buffer.src;
-                    img.classList.remove('opacity-0');
-                    snapshotTimeout = setTimeout(loadNextSnapshot, 90); // ~11 FPS smooth
+            let isFetching = false;
+
+            function refreshFrame() {
+                if (!isCameraPowerOn || !imgElement) {
+                    stopCctvStream();
+                    return;
+                }
+                if (isFetching) return; // Mencegah tumpang tindih request (menghindari gambar glitch/menimpa)
+
+                isFetching = true;
+                // Target URL gambar dinamis menunjuk ke file yang benar sesuai OID
+                const targetSrc = '/cctv/stream_' + currentSelectedOid + '.jpg?t=' + new Date().getTime();
+
+                // Gunakan background preloader agar gambar tidak berkedip (flicker-free swap)
+                const preloader = new Image();
+                preloader.onload = function() {
+                    if (!isCameraPowerOn) return;
+                    imgElement.src = targetSrc;
+                    imgElement.classList.remove('opacity-0');
+                    isFetching = false;
                 };
-                buffer.onerror = () => {
-                    if (!snapshotLoopActive || !isCameraPowerOn) return;
-                    snapshotTimeout = setTimeout(loadNextSnapshot, 1500);
+                preloader.onerror = function() {
+                    // Fallback jika file /cctv/stream_{oid}.jpg belum tersedia, arahkan ke API snapshot
+                    const fallbackSrc = '/api/cctv-snapshot?oid=' + currentSelectedOid + '&t=' + new Date().getTime();
+                    const fallbackPreloader = new Image();
+                    fallbackPreloader.onload = function() {
+                        if (!isCameraPowerOn) return;
+                        imgElement.src = fallbackSrc;
+                        imgElement.classList.remove('opacity-0');
+                        isFetching = false;
+                    };
+                    fallbackPreloader.onerror = function() {
+                        isFetching = false;
+                    };
+                    fallbackPreloader.src = fallbackSrc;
                 };
-                buffer.src = `/api/cctv-snapshot?oid=${targetOid}&t=${Date.now()}`;
+                preloader.src = targetSrc;
             }
-            loadNextSnapshot();
+
+            // Eksekusi frame awal langsung
+            refreshFrame();
+
+            // Refresh berkala dengan setInterval (100ms ~ 10 FPS smooth)
+            cctvStreamInterval = setInterval(refreshFrame, 100);
+        }
+
+        // Kompatibilitas alias untuk fungsi proxy lama
+        function startProxyStream(oid = null) {
+            startCctvStream(oid);
         }
 
         function stopProxyStream() {
-            snapshotLoopActive = false;
-            if (snapshotTimeout) {
-                clearTimeout(snapshotTimeout);
-                snapshotTimeout = null;
-            }
+            stopCctvStream();
         }
 
         function setStreamMode(mode, silent = false) {
@@ -1150,7 +1194,7 @@
                 if (btnProxy) {
                     btnProxy.className = 'px-2.5 py-1 rounded-lg text-slate-400 hover:text-slate-200 transition-all';
                 }
-                stopProxyStream();
+                stopCctvStream();
                 updateStreamDisplay();
                 if (!silent) showCctvToast("Mode Direct LAN (Port 8090) Aktif", "success");
             } else {
@@ -1175,25 +1219,25 @@
             }
         }
 
-        function updateStreamDisplay() {
-            const img = document.getElementById('real-agentdvr-stream');
-            if (!img) return;
+        function updateStreamDisplay(oid = null) {
+            const imgElement = document.getElementById('real-agentdvr-stream');
+            if (!imgElement) return;
 
             if (!isCameraPowerOn) {
-                stopProxyStream();
-                img.src = '';
-                img.classList.add('opacity-0');
+                stopCctvStream();
+                imgElement.src = '';
+                imgElement.classList.add('opacity-0');
                 return;
             }
 
-            const targetOid = getActiveOid();
+            const targetOid = oid !== null ? String(oid) : getActiveOid();
 
             if (currentStreamMode === 'direct') {
-                stopProxyStream();
-                img.src = getDirectStreamUrl(targetOid) + '&t=' + Date.now();
-                img.classList.remove('opacity-0');
+                stopCctvStream();
+                imgElement.src = getDirectStreamUrl(targetOid) + '&t=' + Date.now();
+                imgElement.classList.remove('opacity-0');
             } else {
-                startProxyStream(targetOid);
+                startCctvStream(targetOid);
             }
         }
 
@@ -1432,6 +1476,7 @@
                             devices.forEach(cam => {
                                 const opt = document.createElement('option');
                                 opt.value = cam.id;
+                                opt.setAttribute('data-oid', cam.oid);
                                 opt.textContent = cam.name;
                                 if (currentActiveCctv && (cam.id == currentActiveCctv.id || cam.oid == currentActiveCctv.oid)) {
                                     opt.selected = true;
@@ -1449,7 +1494,8 @@
                         }
 
                         // Inisialisasi stream kamera aktif
-                        setStreamMode(currentStreamMode, true);
+                        const initialOid = currentActiveCctv ? currentActiveCctv.oid : '4';
+                        updateStreamDisplay(initialOid);
                     }
                 })
                 .catch(err => console.error("Error loading CCTV devices:", err));
@@ -1457,11 +1503,26 @@
 
         // Ganti Kamera Aktif dari Dropdown atau Modal (Tanpa reload halaman)
         function onSelectCamera(camId) {
+            // 1. Ambil OID atau ID dari dropdown yang dipilih
+            const select = document.getElementById('cctv-camera-select');
             const foundCam = currentCctvList.find(c => c.id == camId || c.oid == camId);
             if (foundCam) {
                 currentActiveCctv = foundCam;
             }
 
+            let selectedOid = '4';
+            if (foundCam && foundCam.oid) {
+                selectedOid = String(foundCam.oid);
+            } else if (select && select.selectedOptions && select.selectedOptions[0]) {
+                selectedOid = select.selectedOptions[0].getAttribute('data-oid') || select.selectedOptions[0].value;
+            } else {
+                selectedOid = String(camId);
+            }
+
+            // 2. Clear interval lama & mulai stream baru dinamis sesuai selectedOid
+            updateStreamDisplay(selectedOid);
+
+            // 3. Notifikasi backend server untuk update cache kamera aktif
             fetch('/api/cctv-devices/switch/' + camId, { method: 'POST' })
                 .then(res => res.json())
                 .then(data => {
@@ -1474,7 +1535,6 @@
                 })
                 .finally(() => {
                     // Sinkronkan pilihan pada dropdown di atas stream
-                    const select = document.getElementById('cctv-camera-select');
                     if (select && currentActiveCctv) select.value = currentActiveCctv.id;
 
                     // Update Subtitle
@@ -1482,9 +1542,6 @@
                     if (sub && currentActiveCctv) {
                         sub.innerHTML = `${currentActiveCctv.brand || currentActiveCctv.description || 'IP Camera'} &bull; IP: <span class="text-cyan-400 font-bold">${currentActiveCctv.ip}</span> (Port ${currentActiveCctv.port || currentActiveCctv.onvif_port || 2020})`;
                     }
-
-                    // Update Live Stream Video Frame LANGSUNG tanpa reload halaman
-                    updateStreamDisplay();
 
                     if (currentActiveCctv) {
                         showCctvToast(`Beralih ke Kamera: ${currentActiveCctv.name}`, 'success');

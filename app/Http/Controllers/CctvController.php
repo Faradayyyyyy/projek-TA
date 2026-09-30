@@ -339,7 +339,7 @@ class CctvController extends Controller
     /**
      * 6. POST /api/cctv/upload-frame
      * Menerima upload frame gambar dari Edge Gateway dengan parameter ?oid={oid}&cam_id={cam_id}
-     * Menyimpan file frame terpisah berdasarkan OID kamera: storage/app/public/stream_{oid}.jpg
+     * Menyimpan file frame terpisah berdasarkan OID kamera ke public/cctv/stream_{oid}.jpg
      */
     public function uploadFrame(Request $request)
     {
@@ -347,33 +347,44 @@ class CctvController extends Controller
         $camId = $request->query('cam_id') ?? $request->input('cam_id');
 
         if (!$oid && $camId) {
-            $cam = CctvDevice::find($camId);
-            if ($cam && $cam->oid) {
-                $oid = $cam->oid;
-            }
+            try {
+                $cam = CctvDevice::find($camId);
+                if ($cam && $cam->oid) {
+                    $oid = $cam->oid;
+                }
+            } catch (\Throwable $e) {}
         }
 
-        $oid = $oid ?: '4';
+        $oid = $oid ?: 'default';
 
+        // Pastikan folder public/cctv tersedia
+        $cctvDir = public_path('cctv');
+        if (!is_dir($cctvDir)) {
+            @mkdir($cctvDir, 0777, true);
+        }
+
+        $fileName = 'stream_' . $oid . '.jpg';
+        $targetPublicFile = $cctvDir . DIRECTORY_SEPARATOR . $fileName;
         $frameData = null;
+
+        // Simpan file frame terpisah berdasarkan OID sesuai spesifikasi request
         if ($request->hasFile('frame')) {
-            $frameData = file_get_contents($request->file('frame')->getRealPath());
-        } elseif ($request->getContent()) {
+            $request->file('frame')->move($cctvDir, $fileName);
+            if (file_exists($targetPublicFile)) {
+                $frameData = @file_get_contents($targetPublicFile);
+            }
+        } elseif ($request->getContent() && strlen($request->getContent()) > 10) {
             $frameData = $request->getContent();
+            @file_put_contents($targetPublicFile, $frameData);
         }
 
-        if ($frameData && strlen($frameData) > 10) {
-            // Pastikan folder storage/app/public ada
-            $publicDir = storage_path('app/public');
-            if (!is_dir($publicDir)) {
-                @mkdir($publicDir, 0755, true);
+        // Simpan juga ke storage/app/public/stream_{oid}.jpg dan storage/app/cctv_frame_{oid}.jpg untuk kompatibilitas
+        if ($frameData) {
+            $storagePublicDir = storage_path('app/public');
+            if (!is_dir($storagePublicDir)) {
+                @mkdir($storagePublicDir, 0755, true);
             }
-
-            // Simpan file frame terpisah berdasarkan OID
-            $targetStreamFile = storage_path("app/public/stream_{$oid}.jpg");
-            @file_put_contents($targetStreamFile, $frameData);
-
-            // Simpan juga ke storage/app/cctv_frame_{oid}.jpg untuk kompatibilitas
+            @file_put_contents(storage_path("app/public/stream_{$oid}.jpg"), $frameData);
             @file_put_contents(storage_path("app/cctv_frame_{$oid}.jpg"), $frameData);
         }
 
@@ -381,11 +392,14 @@ class CctvController extends Controller
         $commands = $this->popHardwareCommands();
 
         // Ambil info kamera aktif yang sedang dipilih di web
-        $activeId = Cache::get('active_cctv_id');
-        $activeDev = $activeId ? CctvDevice::find($activeId) : null;
-        if (!$activeDev) {
-            $activeDev = CctvDevice::where('is_active', true)->first();
-        }
+        $activeDev = null;
+        try {
+            $activeId = Cache::get('active_cctv_id');
+            $activeDev = $activeId ? CctvDevice::find($activeId) : null;
+            if (!$activeDev) {
+                $activeDev = CctvDevice::where('is_active', true)->first();
+            }
+        } catch (\Throwable $e) {}
 
         return response()->json([
             'status' => 'success',
@@ -408,16 +422,17 @@ class CctvController extends Controller
 
     /**
      * 7. GET /api/cctv-snapshot
-     * Menampilkan frame gambar langsung dari storage/app/public/stream_{oid}.jpg
+     * Menampilkan frame gambar langsung dari public/cctv/stream_{oid}.jpg atau storage
      */
     public function snapshot(Request $request)
     {
         $oid = $request->query('oid', 4);
 
+        $frameFile0 = public_path("cctv/stream_{$oid}.jpg");
         $frameFile1 = storage_path("app/public/stream_{$oid}.jpg");
         $frameFile2 = storage_path("app/cctv_frame_{$oid}.jpg");
 
-        $targetFile = file_exists($frameFile1) ? $frameFile1 : (file_exists($frameFile2) ? $frameFile2 : null);
+        $targetFile = file_exists($frameFile0) ? $frameFile0 : (file_exists($frameFile1) ? $frameFile1 : (file_exists($frameFile2) ? $frameFile2 : null));
 
         // Prioritas 1: Frame terbaru dari Edge Gateway (< 15 detik)
         if ($targetFile && (time() - filemtime($targetFile)) < 15) {
