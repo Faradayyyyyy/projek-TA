@@ -1369,7 +1369,18 @@
                 console.warn("Notice sending hardware control:", err);
             });
 
-            // Juga kirimkan ke endpoint log aktivitas /api/control
+            // Juga kirimkan ke endpoint alternatif /api/cctv-ptz
+            fetch(`/api/cctv-ptz/${command}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken
+                },
+                body: JSON.stringify(ptzPayload)
+            }).catch(() => {});
+
+            // Kirimkan ke endpoint log aktivitas /api/control
             fetch('/api/control', {
                 method: 'POST',
                 headers: {
@@ -1379,6 +1390,30 @@
                 },
                 body: JSON.stringify(ptzPayload)
             }).catch(() => {});
+
+            // Client-side Direct Trigger jika berada di jaringan lokal LAN
+            try {
+                if (window.location.protocol === 'http:') {
+                    const ispyMap = {
+                        'up': 'ispydir_3',
+                        'down': 'ispydir_7',
+                        'left': 'ispydir_1',
+                        'right': 'ispydir_5',
+                        'home': 'home',
+                        'center': 'home'
+                    };
+                    const ispyCmd = ispyMap[command] || command;
+                    const host = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? '127.0.0.1' : (currentActiveCctv?.ip || '127.0.0.1');
+                    if (command === 'home' || command === 'center') {
+                        new Image().src = `http://${host}:8090/q.json?cmd=ptzcommand&field=ptz&value=home&command=home&oid=${selectedOid}&ot=2&t=${Date.now()}`;
+                    } else {
+                        new Image().src = `http://${host}:8090/q.json?cmd=ptzcommand&field=ptz&value=${ispyCmd}&command=${ispyCmd}&oid=${selectedOid}&ot=2&t=${Date.now()}`;
+                        setTimeout(() => {
+                            new Image().src = `http://${host}:8090/q.json?cmd=ptzcommand&field=ptz&value=ispydir_11&command=ispydir_11&oid=${selectedOid}&ot=2&t=${Date.now()}`;
+                        }, 350);
+                    }
+                }
+            } catch (e) {}
 
             const labels = {
                 'up': 'Putar Atas',

@@ -68,42 +68,71 @@ def execute_command_async(cmd):
             if not target_oid:
                 target_oid = "4"
 
-            # 1. Jika target_oid adalah OID Kamera Tapo (misal OID 4): eksekusi via tapo_move.move_tapo(action)
-            if target_oid == "4":
-                print(f"\n[>>> KONTROL INSTAN TAPO C200] Memutar Kamera PTZ (OID {target_oid}) ke arah: {action.upper()}")
-                if has_ptz_driver:
-                    try:
-                        code, text = tapo_move.move_tapo(action)
-                        print(f"[OK KONTROL SELESAI] Tapo PTZ {action.upper()} dieksekusi (Status {code})")
-                    except Exception as e:
-                        print(f"[!] Gagal menggerakkan kamera Tapo: {e}")
-                else:
-                    print("[!] Driver tapo_move tidak tersedia di gateway ini.")
+            print(f"\n[>>> KONTROL INSTAN PTZ] Kamera OID {target_oid} -> {action.upper()}")
 
-            # 2. Jika target_oid adalah OID Kamera Agent DVR lainnya (misal OID 1 atau 2):
-            # Kirimkan perintah PTZ ke API Agent DVR lokal menggunakan HTTP request ke Agent DVR PTZ endpoint
-            else:
-                ispy_map = {
-                    'up': 'ispydir_1',
-                    'down': 'ispydir_7',
-                    'left': 'ispydir_3',
-                    'right': 'ispydir_5',
-                    'home': 'ispydir_4',
-                    'center': 'ispydir_4',
-                    'zoomin': 'ispydir_9',
-                    'zoomout': 'ispydir_10'
-                }
-                action_code = ispy_map.get(action, f"ispydir_{action}" if not action.startswith("ispy") else action)
-                agent_ptz_url = f"http://localhost:8090/ptz.aspx?oid={target_oid}&ot=2&command={action_code}"
-                print(f"\n[>>> KONTROL INSTAN AGENT DVR] Mengirim PTZ (OID {target_oid}, Action: {action.upper()}) -> {agent_ptz_url}")
+            # Pemetaan arah Agent DVR internal (.NET ONVIF Continuous Move)
+            ispy_map = {
+                'up': 'ispydir_3',
+                'down': 'ispydir_7',
+                'left': 'ispydir_1',
+                'right': 'ispydir_5',
+                'home': 'home',
+                'center': 'home',
+                'stop': 'ispydir_11',
+                'zoomin': 'ispydir_9',
+                'zoomout': 'ispydir_10'
+            }
+            action_code = ispy_map.get(action, f"ispydir_{action}" if not action.startswith("ispy") else action)
+
+            # 1. Prioritas Utama: Kontrol via Agent DVR lokal (Port 8090)
+            agent_executed = False
+            try:
+                base_q = "http://localhost:8090/q.json"
+                if action in ['home', 'center']:
+                    params = {
+                        'cmd': 'ptzcommand',
+                        'field': 'ptz',
+                        'value': 'home',
+                        'command': 'home',
+                        'oid': target_oid,
+                        'ot': 2
+                    }
+                    r = requests.get(base_q, params=params, timeout=1.5)
+                    agent_executed = (r.status_code == 200)
+                else:
+                    params_start = {
+                        'cmd': 'ptzcommand',
+                        'field': 'ptz',
+                        'value': action_code,
+                        'command': action_code,
+                        'oid': target_oid,
+                        'ot': 2
+                    }
+                    r_start = requests.get(base_q, params=params_start, timeout=1.5)
+                    time.sleep(0.35)
+                    params_stop = {
+                        'cmd': 'ptzcommand',
+                        'field': 'ptz',
+                        'value': 'ispydir_11',
+                        'command': 'ispydir_11',
+                        'oid': target_oid,
+                        'ot': 2
+                    }
+                    r_stop = requests.get(base_q, params=params_stop, timeout=1.5)
+                    agent_executed = (r_start.status_code == 200)
+
+                if agent_executed:
+                    print(f"[OK KONTROL SELESAI] Agent DVR PTZ (OID {target_oid}) {action.upper()} terkirim sukses")
+            except Exception as e:
+                print(f"[!] Gagal mengirim PTZ ke Agent DVR lokal (OID {target_oid}): {e}")
+
+            # 2. Sinkronisasi Ganda: Eksekusi direct tapo_move (SOAP ONVIF) jika OID 4 atau jika Agent DVR belum menangani
+            if has_ptz_driver and (target_oid == "4" or not agent_executed):
                 try:
-                    resp = requests.get(agent_ptz_url, timeout=1.5)
-                    if resp.status_code != 200:
-                        q_url = f"http://localhost:8090/q.json?cmd=ptzCommand&command={action_code}&oid={target_oid}&ot=2"
-                        requests.get(q_url, timeout=1.5)
-                    print(f"[OK KONTROL SELESAI] Agent DVR PTZ (OID {target_oid}) {action.upper()} terkirim (Status {resp.status_code})")
+                    code, text = tapo_move.move_tapo(action)
+                    print(f"[OK KONTROL SELESAI] Direct Tapo SOAP PTZ {action.upper()} dieksekusi (Status {code})")
                 except Exception as e:
-                    print(f"[!] Gagal mengirim PTZ ke Agent DVR lokal (OID {target_oid}): {e}")
+                    print(f"[!] Gagal direct tapo_move: {e}")
 
         except Exception as e:
             print(f"[!] Terjadi kesalahan pada eksekusi PTZ: {e}")

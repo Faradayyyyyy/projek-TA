@@ -102,7 +102,7 @@ class CctvController extends Controller
         if ($devices->isEmpty()) {
             $default = CctvDevice::create([
                 'name' => 'Kamera 4 (Tapo C200 Lab 2)',
-                'ip_address' => '10.32.72.78',
+                'ip_address' => '10.32.72.177',
                 'oid' => '4',
                 'agent_oid' => 4,
                 'rtsp_port' => 554,
@@ -569,6 +569,24 @@ class CctvController extends Controller
         // Eksekusi lokal jika di server lokal Windows
         if (PHP_OS_FAMILY === 'Windows' || in_array(request()->getHost(), ['localhost', '127.0.0.1'])) {
             try {
+                $ispyMap = [
+                    'up' => 'ispydir_3',
+                    'down' => 'ispydir_7',
+                    'left' => 'ispydir_1',
+                    'right' => 'ispydir_5',
+                    'home' => 'home',
+                    'center' => 'home',
+                    'stop' => 'ispydir_11'
+                ];
+                $val = $ispyMap[$action] ?? $action;
+                if ($action === 'home' || $action === 'center') {
+                    Http::timeout(0.4)->get("http://127.0.0.1:8090/q.json?cmd=ptzcommand&field=ptz&value=home&command=home&oid={$oid}&ot=2");
+                } else {
+                    Http::timeout(0.4)->get("http://127.0.0.1:8090/q.json?cmd=ptzcommand&field=ptz&value={$val}&command={$val}&oid={$oid}&ot=2");
+                }
+            } catch (\Throwable $e) {}
+
+            try {
                 $pyPath = base_path('tapo_move.py');
                 if (file_exists($pyPath) && $oid === '4') {
                     $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($action);
@@ -663,6 +681,24 @@ class CctvController extends Controller
 
             // Eksekusi lokal jika di server lokal Windows
             if (PHP_OS_FAMILY === 'Windows' || in_array(request()->getHost(), ['localhost', '127.0.0.1'])) {
+                try {
+                    $ispyMap = [
+                        'up' => 'ispydir_3',
+                        'down' => 'ispydir_7',
+                        'left' => 'ispydir_1',
+                        'right' => 'ispydir_5',
+                        'home' => 'home',
+                        'center' => 'home',
+                        'stop' => 'ispydir_11'
+                    ];
+                    $val = $ispyMap[$action] ?? $action;
+                    if ($action === 'home' || $action === 'center') {
+                        Http::timeout(0.4)->get("http://127.0.0.1:8090/q.json?cmd=ptzcommand&field=ptz&value=home&command=home&oid={$oid}&ot=2");
+                    } else {
+                        Http::timeout(0.4)->get("http://127.0.0.1:8090/q.json?cmd=ptzcommand&field=ptz&value={$val}&command={$val}&oid={$oid}&ot=2");
+                    }
+                } catch (\Throwable $e) {}
+
                 try {
                     $pyPath = base_path('tapo_move.py');
                     if (file_exists($pyPath) && $oid === '4') {

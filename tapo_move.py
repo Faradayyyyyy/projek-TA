@@ -10,7 +10,7 @@ import requests
 # =========================================================================
 # KONFIGURASI KAMERA TAPO C200 (ONVIF)
 # =========================================================================
-IP = "10.32.72.46"
+IP = "10.32.72.177"
 PORT = 2020
 USER = "faradays"
 PASS = "12345678"
@@ -25,15 +25,42 @@ def safe_print(*args, **kwargs):
 
 def load_config():
     global IP, PORT, USER, PASS
+    # 1. Coba baca IP dari live configuration Agent DVR jika ada
+    try:
+        agent_objects = r"C:\Program Files\Agent\Media\XML\objects.json"
+        if os.path.exists(agent_objects):
+            with open(agent_objects, 'r', encoding='utf-8') as f:
+                dvr_data = json.load(f)
+                cameras = dvr_data.get('cameras', [])
+                cam4 = next((c for c in cameras if c.get('id') == 4 or c.get('name') == 'kamera 2'), None)
+                if cam4 and 'settings' in cam4:
+                    settings = cam4['settings']
+                    onvifident = settings.get('onvifident', '')
+                    if '://' in onvifident:
+                        host_part = onvifident.split('://', 1)[1].split('/')[0]
+                        if ':' in host_part:
+                            ip_cand, port_cand = host_part.split(':')
+                            IP = ip_cand
+                            PORT = int(port_cand)
+                        else:
+                            IP = host_part
+                    if settings.get('login'):
+                        USER = settings.get('login')
+                    if settings.get('password'):
+                        PASS = settings.get('password')
+    except Exception:
+        pass
+
+    # 2. Coba baca dari storage/app/cctv_devices.json jika belum ditemukan
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         cfg_path = os.path.join(script_dir, 'storage', 'app', 'cctv_devices.json')
         if os.path.exists(cfg_path):
             with open(cfg_path, 'r', encoding='utf-8') as f:
                 devices = json.load(f)
-                active = next((d for d in devices if d.get('is_active')), devices[0] if devices else None)
+                active = next((d for d in devices if str(d.get('oid')) == '4' or d.get('is_active')), devices[0] if devices else None)
                 if active:
-                    if active.get('ip'):
+                    if active.get('ip') and IP == "10.32.72.46":
                         IP = active.get('ip')
                     if active.get('port'):
                         PORT = int(active.get('port'))
@@ -137,6 +164,20 @@ def move_tapo(direction):
     code, text = send_soap("http://www.onvif.org/ver20/ptz/wsdl/ContinuousMove", body)
     safe_print(f"Move '{direction}' status: {code}")
     
+    if code != 200:
+        # Fallback otomatis ke API Agent DVR lokal (Port 8090)
+        try:
+            ispy_map = {'up': 'ispydir_3', 'down': 'ispydir_7', 'left': 'ispydir_1', 'right': 'ispydir_5', 'home': 'home', 'stop': 'ispydir_11'}
+            action_code = ispy_map.get(direction, direction)
+            base_q = "http://localhost:8090/q.json"
+            requests.get(base_q, params={'cmd': 'ptzcommand', 'field': 'ptz', 'value': action_code, 'command': action_code, 'oid': 4, 'ot': 2}, timeout=1.5)
+            time.sleep(0.35)
+            requests.get(base_q, params={'cmd': 'ptzcommand', 'field': 'ptz', 'value': 'ispydir_11', 'command': 'ispydir_11', 'oid': 4, 'ot': 2}, timeout=1.5)
+            safe_print(f"Fallback ke Agent DVR lokal berhasil untuk arah '{direction}'")
+            return 200, "Agent DVR Fallback OK"
+        except Exception as e_fb:
+            safe_print(f"Agent DVR fallback gagal: {e_fb}")
+
     # 2. Rotasi selama 0.4 detik lalu stop
     time.sleep(0.4)
     code_stop, _ = move_tapo("stop")
