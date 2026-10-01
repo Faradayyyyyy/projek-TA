@@ -267,8 +267,8 @@
                     <div id="cctv-container" class="relative w-full aspect-video bg-[#0f172a] rounded-xl overflow-hidden border border-cyan-500/30 shadow-2xl flex items-center justify-center" style="background-color: #0f172a; overflow: hidden; display: flex; align-items: center; justify-content: center;">
                         <img id="real-agentdvr-stream"
                              src="" 
-                             class="w-full h-auto max-h-full object-contain transition-opacity duration-300 border-0 outline-none"
-                             style="width: 100%; height: auto; max-height: 100%; object-fit: contain; border: none; outline: none;"
+                             class="w-full h-full object-cover transition-opacity duration-300 border-0 outline-none"
+                             style="width: 100%; height: 100%; object-fit: cover; border: none; outline: none;"
                              alt="Live CCTV Feed"
                              onerror="handleStreamError()">
 
@@ -1104,7 +1104,7 @@
         function getDirectStreamUrl(oid = null) {
             const targetOid = oid !== null ? oid : getActiveOid();
             const host = window.location.hostname || 'localhost';
-            return `http://${host}:8090/video.mjpg?oid=${targetOid}`;
+            return `http://${host}:8090/video.mjpg?oid=${targetOid}&size=1280x720`;
         }
 
         // Hentikan interval lama jika ada sebelum memulai interval baru

@@ -61,10 +61,36 @@ def print_banner(vps_url):
     print("=" * 72)
     print("[*] Menginisialisasi streaming multi-kamera dan kontrol non-blocking...\n")
 
+def strip_white_letterbox(img):
+    """
+    Mendeteksi dan memotong bar putih (letterbox) di bagian atas dan bawah frame
+    yang dihasilkan oleh kanvas letterboxing Agent DVR. Menjamin video 100% full screen.
+    """
+    try:
+        w, h = img.size
+        sample_xs = [int(w * f) for f in (0.1, 0.25, 0.5, 0.75, 0.9)]
+        top = 0
+        for y in range(0, h // 2):
+            if all(img.getpixel((x, y))[:3] == (255, 255, 255) for x in sample_xs):
+                top = y + 1
+            else:
+                break
+        bottom = h
+        for y in range(h - 1, h // 2, -1):
+            if all(img.getpixel((x, y))[:3] == (255, 255, 255) for x in sample_xs):
+                bottom = y
+            else:
+                break
+        if (top > 3 or bottom < h - 3) and (bottom > top + 30):
+            img = img.crop((0, top, w, bottom))
+    except Exception:
+        pass
+    return img
+
 def process_frame(raw_bytes, target_size=TARGET_RESOLUTION, quality=JPEG_QUALITY):
     """
     Mengubah ukuran frame ke 1280x720 (720p HD) dan mengompres dengan JPEG Quality 75 optimize=True.
-    Mencegah gambar burik / pecah sekaligus menjaga detail teks dan obyek tetap tajam.
+    Otomatis memotong letterbox putih agar gambar kamera 100% full tanpa padding dan tidak burik.
     """
     if not raw_bytes or len(raw_bytes) < 100:
         return raw_bytes
@@ -73,6 +99,9 @@ def process_frame(raw_bytes, target_size=TARGET_RESOLUTION, quality=JPEG_QUALITY
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
+        # Bersihkan bar putih letterbox jika ada
+        img = strip_white_letterbox(img)
+
         # Resize ke 1280x720 HD jika belum sesuai
         if img.size != target_size:
             img = img.resize(target_size, Image.Resampling.BILINEAR)
@@ -109,19 +138,31 @@ def execute_command_async(cmd):
             if not target_oid_str:
                 target_oid_str = "4"
 
-            # 1. Jika target_oid adalah Kamera Tapo (OID 4): panggil tapo_move.move_tapo(action)
+            # 1. Jika target_oid adalah Kamera Tapo (OID 4): panggil tapo_move.move_tapo(action, target_oid="4")
             if target_oid_str == "4":
                 print(f"\n[>>> KONTROL INSTAN TAPO C200] Memutar Kamera PTZ (OID {target_oid_str}) ke arah: {action.upper()}")
                 if has_ptz_driver:
                     try:
-                        code, text = tapo_move.move_tapo(action)
+                        code, text = tapo_move.move_tapo(action, target_oid="4")
                         print(f"[OK KONTROL SELESAI] Tapo PTZ {action.upper()} dieksekusi (Status {code})")
                     except Exception as e:
                         print(f"[!] Gagal menggerakkan kamera Tapo via tapo_move: {e}")
                 else:
                     print("[!] Driver tapo_move tidak tersedia di gateway ini.")
 
-            # 2. Jika target_oid adalah Kamera Agent DVR lainnya (misal OID 1 atau 2):
+            # 2. Jika target_oid adalah Kamera 1 - Lab Otomasi (OID 5 / ID 2): panggil tapo_move.move_tapo(action, target_oid="5")
+            elif target_oid_str in ["5", "1", "2"]:
+                print(f"\n[>>> KONTROL INSTAN TAPO C200] Memutar Kamera 1 PTZ (OID {target_oid_str}) ke arah: {action.upper()}")
+                if has_ptz_driver:
+                    try:
+                        code, text = tapo_move.move_tapo(action, target_oid="5")
+                        print(f"[OK KONTROL SELESAI] Kamera 1 PTZ {action.upper()} dieksekusi (Status {code})")
+                    except Exception as e:
+                        print(f"[!] Gagal menggerakkan Kamera 1 via tapo_move: {e}")
+                else:
+                    print("[!] Driver tapo_move tidak tersedia di gateway ini.")
+
+            # 3. Jika target_oid adalah Kamera Agent DVR lainnya:
             # Kirim request PTZ ke HTTP API Agent DVR lokal
             else:
                 ispy_map = {
@@ -249,7 +290,7 @@ class CameraStreamWorker:
         self.name = cam_info.get("name", f"Kamera {self.oid}")
         self.session = session
 
-        self.grab_url = f"{AGENT_DVR_BASE_URL}/grab.jpg?oid={self.oid}"
+        self.grab_url = f"{AGENT_DVR_BASE_URL}/grab.jpg?oid={self.oid}&size=1280x720"
         self.upload_url = f"{vps_url}/api/cctv/upload-frame?oid={self.oid}&cam_id={self.cam_id}"
 
         # Queue ukuran 1: jika uploader masih mengirim, frame lama dibuang dan diganti yang terbaru (Zero Lag)

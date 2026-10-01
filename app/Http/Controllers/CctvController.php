@@ -588,8 +588,8 @@ class CctvController extends Controller
 
             try {
                 $pyPath = base_path('tapo_move.py');
-                if (file_exists($pyPath) && $oid === '4') {
-                    $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($action);
+                if (file_exists($pyPath) && in_array($oid, ['4', '5'])) {
+                    $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($action) . " " . escapeshellarg($oid);
                     pclose(popen("start /B " . $cmdExec, "r"));
                 }
             } catch (\Exception $e) {}
@@ -701,8 +701,8 @@ class CctvController extends Controller
 
                 try {
                     $pyPath = base_path('tapo_move.py');
-                    if (file_exists($pyPath) && $oid === '4') {
-                        $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($action);
+                    if (file_exists($pyPath) && in_array($oid, ['4', '5'])) {
+                        $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($action) . " " . escapeshellarg($oid);
                         pclose(popen("start /B " . $cmdExec, "r"));
                     }
                 } catch (\Exception $e) {}
