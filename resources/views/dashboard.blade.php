@@ -1217,6 +1217,15 @@
                 console.warn("Direct stream port 8090 failed. Auto-switching to Web Proxy mode...");
                 setStreamMode('proxy', true);
                 showCctvToast("Port 8090 tidak terjangkau dari jaringan ini. Otomatis beralih ke Mode Web Proxy!", "info");
+            } else {
+                // Di mode proxy jika gambar gagal dimuat, muat fallback snapshot untuk OID yang sama tanpa mengganti/mengalihkan ke kamera lain
+                const imgElement = document.getElementById('real-agentdvr-stream');
+                if (imgElement && currentSelectedOid) {
+                    const fallbackUrl = '/api/cctv-snapshot?oid=' + currentSelectedOid + '&t=' + Date.now();
+                    if (!imgElement.src.includes('/api/cctv-snapshot')) {
+                        imgElement.src = fallbackUrl;
+                    }
+                }
             }
         }
 

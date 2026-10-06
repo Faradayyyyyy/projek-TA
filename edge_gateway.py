@@ -6,7 +6,7 @@ import json
 import queue
 import threading
 import requests
-from PIL import Image
+from PIL import Image, ImageStat, ImageDraw, ImageFont
 import paho.mqtt.client as mqtt
 
 # =========================================================================
@@ -29,6 +29,27 @@ MQTT_BROKER_PORT = 1883
 
 # Inisialisasi MQTT Client Persisten
 mqtt_client = mqtt.Client(client_id="EdgeGateway_Laptop")
+
+# =========================================================================
+# ISOLASI FRAME PER KAMERA (DICTIONARY camera_frames[oid])
+# DILARANG MENGGUNAKAN VARIABEL FRAME GLOBAL TUNGGAL ATAU MEMAKAI FRAME KAMERA LAIN
+# =========================================================================
+camera_frames = {}
+camera_frames_lock = threading.Lock()
+
+def set_camera_frame(oid, frame_bytes):
+    """Menyimpan frame terisolasi khusus untuk OID kamera bersangkutan."""
+    if oid is None:
+        return
+    with camera_frames_lock:
+        camera_frames[str(oid)] = frame_bytes
+
+def get_camera_frame(oid):
+    """Mengambil frame terisolasi milik OID kamera tertentu."""
+    if oid is None:
+        return None
+    with camera_frames_lock:
+        return camera_frames.get(str(oid))
 
 def init_mqtt_background():
     """Menghubungkan MQTT Client dan menjalankannya di latar belakang."""
@@ -86,6 +107,65 @@ def strip_white_letterbox(img):
     except Exception:
         pass
     return img
+
+def is_offline_frame(raw_bytes):
+    """
+    Mendeteksi apakah frame dari Agent DVR merupakan frame dummy putih/blank
+    (karena RTSP/ONVIF kamera terputus atau gagal konek).
+    """
+    if not raw_bytes or len(raw_bytes) < 100:
+        return True
+    if len(raw_bytes) < 3000:
+        try:
+            img = Image.open(io.BytesIO(raw_bytes))
+            stat = ImageStat.Stat(img)
+            # Frame putih Agent DVR: rata-rata channel RGB > 248 dan stddev < 15
+            if all(m > 248 for m in stat.mean[:3]) and all(s < 15 for s in stat.stddev[:3]):
+                return True
+        except Exception:
+            return True
+    return False
+
+def generate_offline_frame(oid, name="Kamera", ip=""):
+    """
+    Menghasilkan frame placeholder 'NO SIGNAL / OFFLINE' beresolusi 1280x720 (720p HD)
+    khusus untuk OID kamera tertentu.
+    Dilarang keras menampilkan atau memakai frame dari kamera lain saat kamera mengalami kegagalan.
+    """
+    try:
+        img = Image.new('RGB', TARGET_RESOLUTION, color=(15, 23, 42)) # Background #0f172a
+        draw = ImageDraw.Draw(img)
+
+        # Border luar merah
+        draw.rectangle([40, 40, 1240, 680], outline=(239, 68, 68), width=3)
+
+        # Lingkaran indikator silang / offline di tengah
+        cx, cy = 640, 260
+        r = 55
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(30, 41, 59), outline=(239, 68, 68), width=4)
+        draw.line([cx - 30, cy - 30, cx + 30, cy + 30], fill=(239, 68, 68), width=5)
+        draw.line([cx + 30, cy - 30, cx - 30, cy + 30], fill=(239, 68, 68), width=5)
+
+        # Teks keterangan
+        title_text = "NO SIGNAL / OFFLINE"
+        sub_text = f"{name} (OID: {oid})"
+        ip_text = f"IP: {ip}" if ip else ""
+        info_text = "Koneksi Kamera Gagal atau Timeout. Memeriksa kembali sinyal..."
+
+        draw.text((640, 360), title_text, fill=(239, 68, 68), anchor="mm")
+        draw.text((640, 410), sub_text, fill=(241, 245, 249), anchor="mm")
+        if ip_text:
+            draw.text((640, 445), ip_text, fill=(148, 163, 184), anchor="mm")
+        draw.text((640, 485), info_text, fill=(100, 116, 139), anchor="mm")
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=75, optimize=True)
+        return buf.getvalue()
+    except Exception:
+        buf = io.BytesIO()
+        img = Image.new('RGB', TARGET_RESOLUTION, color=(15, 23, 42))
+        img.save(buf, format="JPEG", quality=75)
+        return buf.getvalue()
 
 def process_frame(raw_bytes, target_size=TARGET_RESOLUTION, quality=JPEG_QUALITY):
     """
@@ -281,6 +361,7 @@ class CameraStreamWorker:
     Worker streaming independen untuk satu kamera aktif.
     Memisahkan loop pengambilan frame lokal (Agent DVR) dan upload HTTP (Cloud VPS)
     secara asynchronous dan non-blocking melalui queue berukuran 1.
+    Menjamin isolasi total frame per OID kamera tanpa saling menimpa atau memakai frame kamera lain.
     """
     def __init__(self, vps_url, cam_info, session):
         self.vps_url = vps_url
@@ -288,10 +369,15 @@ class CameraStreamWorker:
         self.oid = str(cam_info.get("oid") or "4")
         self.cam_id = str(cam_info.get("id") or "")
         self.name = cam_info.get("name", f"Kamera {self.oid}")
+        self.ip = str(cam_info.get("ip") or cam_info.get("ip_address") or "")
         self.session = session
 
         self.grab_url = f"{AGENT_DVR_BASE_URL}/grab.jpg?oid={self.oid}&size=1280x720"
         self.upload_url = f"{vps_url}/api/cctv/upload-frame?oid={self.oid}&cam_id={self.cam_id}"
+
+        # Inisialisasi frame placeholder offline awal khusus OID ini di dictionary camera_frames
+        initial_offline = generate_offline_frame(self.oid, self.name, self.ip)
+        set_camera_frame(self.oid, initial_offline)
 
         # Queue ukuran 1: jika uploader masih mengirim, frame lama dibuang dan diganti yang terbaru (Zero Lag)
         self.frame_queue = queue.Queue(maxsize=1)
@@ -304,6 +390,7 @@ class CameraStreamWorker:
         # Statistik FPS
         self.fps_counter = 0
         self.fps_timer = time.time()
+        self.is_currently_offline = False
 
     def start(self):
         print(f"[*] Menjalankan Stream Worker Independen: {self.name} (OID {self.oid})")
@@ -316,44 +403,80 @@ class CameraStreamWorker:
     def _grab_loop(self):
         """Loop independen untuk mengambil frame JPEG dari Agent DVR lokal (Target: 10 - 15 FPS)."""
         target_interval = FRAME_INTERVAL # ~0.083s (12 FPS)
+        cached_offline_frame = None
+        last_offline_gen = 0
+
         while not self.stop_event.is_set():
             loop_start = time.time()
+            frame_bytes = None
+            offline_detected = False
+
             try:
                 res = self.session.get(self.grab_url, timeout=0.8)
                 if res.status_code == 200 and len(res.content) > 100:
-                    # Resize ke 1280x720 HD dan optimasi kompresi JPEG 75
-                    processed_bytes = process_frame(res.content, TARGET_RESOLUTION, JPEG_QUALITY)
-
-                    # Masukkan ke queue upload tanpa blocking
-                    try:
-                        self.frame_queue.put_nowait(processed_bytes)
-                    except queue.Full:
-                        try:
-                            self.frame_queue.get_nowait()
-                        except queue.Empty:
-                            pass
-                        try:
-                            self.frame_queue.put_nowait(processed_bytes)
-                        except queue.Full:
-                            pass
+                    if is_offline_frame(res.content):
+                        offline_detected = True
+                    else:
+                        # Frame valid dari feed video aktif
+                        frame_bytes = process_frame(res.content, TARGET_RESOLUTION, JPEG_QUALITY)
+                        if self.is_currently_offline:
+                            print(f"[ONLINE] Sinyal kamera {self.name} (OID {self.oid}) terhubung kembali!")
+                            self.is_currently_offline = False
                 else:
-                    time.sleep(0.15)
+                    offline_detected = True
             except Exception:
-                time.sleep(0.1)
+                offline_detected = True
 
-            # Jaga kestabilan frame rate pada kisaran 10 - 15 FPS
+            if offline_detected:
+                if not self.is_currently_offline:
+                    print(f"[OFFLINE] Kamera {self.name} (OID {self.oid}) tidak tersambung. Mengaktifkan frame placeholder NO SIGNAL...")
+                    self.is_currently_offline = True
+
+                # Buat atau perbarui placeholder offline khusus OID ini setiap ~2 detik
+                now = time.time()
+                if cached_offline_frame is None or (now - last_offline_gen) > 2.0:
+                    cached_offline_frame = generate_offline_frame(self.oid, self.name, self.ip)
+                    last_offline_gen = now
+                frame_bytes = cached_offline_frame
+
+            if frame_bytes:
+                # Simpan HANYA ke camera_frames[self.oid]. Dilarang memakai frame kamera lain.
+                set_camera_frame(self.oid, frame_bytes)
+
+                # Masukkan ke queue upload tanpa blocking
+                try:
+                    self.frame_queue.put_nowait(frame_bytes)
+                except queue.Full:
+                    try:
+                        self.frame_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self.frame_queue.put_nowait(frame_bytes)
+                    except queue.Full:
+                        pass
+
+            # Atur delay pengambilan frame
             elapsed = time.time() - loop_start
-            sleep_duration = max(0.01, target_interval - elapsed)
-            time.sleep(sleep_duration)
+            if offline_detected:
+                # Jika offline, throttle ke ~2 FPS untuk menghemat CPU dan kestabilan
+                time.sleep(max(0.1, 0.5 - elapsed))
+            else:
+                sleep_duration = max(0.01, target_interval - elapsed)
+                time.sleep(sleep_duration)
 
     def _upload_loop(self):
         """Loop upload HTTP non-blocking ke Cloud VPS."""
         while not self.stop_event.is_set():
             try:
-                # Ambil frame terbaru dari queue
+                # Ambil frame terbaru dari queue atau fallback ke frame terisolasi OID sendiri
                 try:
-                    frame_data = self.frame_queue.get(timeout=0.5)
+                    frame_data = self.frame_queue.get(timeout=0.4)
                 except queue.Empty:
+                    frame_data = get_camera_frame(self.oid)
+
+                if not frame_data:
+                    time.sleep(0.05)
                     continue
 
                 # Upload frame ke VPS
@@ -378,12 +501,96 @@ class CameraStreamWorker:
                 now = time.time()
                 if now - self.fps_timer >= 5.0:
                     calc_fps = self.fps_counter / (now - self.fps_timer)
-                    print(f"[STREAM LIVE] {self.name} (OID {self.oid}): ~{calc_fps:.1f} FPS | 1280x720 HD (Quality {JPEG_QUALITY})")
+                    status_label = "OFFLINE (Placeholder)" if self.is_currently_offline else "LIVE STREAM"
+                    print(f"[{status_label}] {self.name} (OID {self.oid}): ~{calc_fps:.1f} FPS | 1280x720 HD (Quality {JPEG_QUALITY})")
                     self.fps_counter = 0
                     self.fps_timer = now
 
             except Exception:
                 time.sleep(0.05)
+
+def ensure_camera_registered_in_agent_dvr(vps_url, cam, session):
+    """
+    Mengecek dan mendaftarkan kamera baru ke Agent DVR lokal (port 8090) via HTTP API.
+    Jika kamera belum terdaftar, kirim parameter ke q.json?cmd=addOnvif,
+    tangkap OID resmi dari respons JSON, lalu update/sinkronkan OID baru ke Laravel VPS.
+    """
+    if not cam or not isinstance(cam, dict):
+        return str(cam.get("oid") or "4") if cam else "4"
+
+    cam_id = cam.get("id")
+    ip = str(cam.get("ip") or cam.get("ip_address") or "").strip()
+    port = cam.get("port") or cam.get("onvif_port") or 2020
+    user = str(cam.get("user") or cam.get("username") or "").strip()
+    password = str(cam.get("pass") or cam.get("password") or "").strip()
+    current_oid = str(cam.get("oid") or "").strip()
+    name = str(cam.get("name") or f"Kamera {current_oid or ip}").strip()
+
+    # 1. Dapatkan daftar kamera yang sudah ada di Agent DVR
+    existing_cameras = {}
+    try:
+        r = session.get(f"{AGENT_DVR_BASE_URL}/q.json?cmd=getobjects", timeout=2.0)
+        if r.status_code == 200:
+            data = r.json()
+            obj_list = data.get("objectList", [])
+            for obj in obj_list:
+                if obj.get("typeID") == 2:  # typeID 2 adalah Camera di Agent DVR
+                    obj_id = str(obj.get("id"))
+                    obj_name = obj.get("name", "")
+                    existing_cameras[obj_id] = obj_name
+    except Exception as e:
+        print(f"[!] Warning: Gagal mengecek objek di Agent DVR: {e}")
+
+    # Jika current_oid sudah ada di daftar objek Agent DVR, kamera sudah terdaftar
+    if current_oid and current_oid in existing_cameras:
+        return current_oid
+
+    # 2. Jika belum ada atau OID belum terdaftar, daftarkan otomatis via HTTP API Agent DVR
+    if ip:
+        print(f"[*] Kamera '{name}' (IP: {ip}, OID awal: '{current_oid}') belum terdaftar di Agent DVR.")
+        print(f"[*] Mendaftarkan kamera otomatis ke Agent DVR via HTTP API...")
+        try:
+            onvif_uri = f"http://{ip}:{port}/onvif/device_service"
+            add_params = {
+                "cmd": "addOnvif",
+                "uri": onvif_uri,
+                "username": user,
+                "password": password,
+                "name": name
+            }
+            res = session.get(f"{AGENT_DVR_BASE_URL}/q.json", params=add_params, timeout=5.0)
+            if res.status_code == 200:
+                resp_data = res.json()
+                status = resp_data.get("status")
+                new_oid = resp_data.get("oid")
+                if status == "ok" and new_oid is not None:
+                    official_oid = str(new_oid)
+                    print(f"[+] Kamera '{name}' BERHASIL didaftarkan di Agent DVR! OID resmi: {official_oid}")
+
+                    # Sinkronkan OID baru kembali ke database Laravel VPS via API
+                    try:
+                        sync_payload = {
+                            "id": cam_id,
+                            "oid": official_oid,
+                            "agent_oid": int(official_oid),
+                            "ip": ip,
+                            "name": name
+                        }
+                        sync_url = f"{vps_url}/api/cctv-devices/{cam_id}/update-oid" if cam_id else f"{vps_url}/api/cctv-devices/update-oid"
+                        sr = session.post(sync_url, json=sync_payload, timeout=3.0)
+                        if sr.status_code == 200:
+                            print(f"[+] Sinkronisasi OID ke Laravel VPS SUKSES: {name} -> OID {official_oid}")
+                        else:
+                            session.post(f"{vps_url}/api/cctv-devices/update-oid", json=sync_payload, timeout=3.0)
+                    except Exception as ex:
+                        print(f"[!] Gagal sinkronisasi OID ke Laravel VPS: {ex}")
+
+                    cam["oid"] = official_oid
+                    return official_oid
+        except Exception as e:
+            print(f"[!] Gagal mendaftarkan kamera ke Agent DVR: {e}")
+
+    return current_oid or "4"
 
 class CameraStreamManager:
     """Mengelola seluruh instance CameraStreamWorker secara dinamis dan concurrency multi-kamera."""
@@ -398,6 +605,11 @@ class CameraStreamManager:
         with self.lock:
             active_oids = set()
             for cam in camera_list:
+                # Pastikan kamera terdaftar di Agent DVR dan OID tersinkronisasi
+                official_oid = ensure_camera_registered_in_agent_dvr(self.vps_url, cam, self.session)
+                if official_oid:
+                    cam["oid"] = str(official_oid)
+
                 oid = str(cam.get("oid") or "").strip()
                 if not oid:
                     continue

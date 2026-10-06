@@ -489,21 +489,81 @@ class CctvController extends Controller
     }
 
     /**
-     * 7. GET /api/cctv-snapshot
-     * Menampilkan frame gambar langsung dari public/cctv/stream_{oid}.jpg atau storage
+     * Helper: Menghasilkan gambar placeholder offline resmi per OID (JPEG / SVG)
+     * Dilarang mengalihkan ke Kamera 1 atau kamera lain.
      */
-    public function snapshot(Request $request)
+    public function renderOfflinePlaceholder($oid)
     {
-        $oid = $request->query('oid', 4);
+        $oidStr = (string) $oid;
+        if (extension_loaded('gd')) {
+            $width = 1280;
+            $height = 720;
+            $im = imagecreatetruecolor($width, $height);
+            $bg = imagecolorallocate($im, 15, 23, 42); // #0f172a
+            imagefilledrectangle($im, 0, 0, $width, $height, $bg);
 
-        $frameFile0 = public_path("cctv/stream_{$oid}.jpg");
-        $frameFile1 = storage_path("app/public/stream_{$oid}.jpg");
-        $frameFile2 = storage_path("app/cctv_frame_{$oid}.jpg");
+            $red = imagecolorallocate($im, 239, 68, 68); // #ef4444
+            $white = imagecolorallocate($im, 241, 245, 249); // #f1f5f9
+            $gray = imagecolorallocate($im, 148, 163, 184); // #94a3b8
+            $darkRed = imagecolorallocate($im, 69, 10, 10);
+
+            // Border bingkai merah
+            imagerectangle($im, 30, 30, $width - 30, $height - 30, $red);
+            imagerectangle($im, 31, 31, $width - 31, $height - 31, $red);
+
+            // Teks status offline
+            imagestring($im, 5, 540, 310, "CAMERA OFFLINE", $red);
+            imagestring($im, 5, 510, 345, "NO SIGNAL - OID: " . $oidStr, $white);
+            imagestring($im, 4, 465, 385, "Sinyal kamera terputus atau frame usang (>10s)", $gray);
+            imagestring($im, 3, 505, 420, "Menunggu update live frame dari Edge Gateway...", $gray);
+
+            ob_start();
+            imagejpeg($im, null, 75);
+            $jpegData = ob_get_clean();
+            imagedestroy($im);
+
+            return response($jpegData, 200, [
+                'Content-Type' => 'image/jpeg',
+                'Cache-Control' => 'no-cache, no-store, must-revalidate, max-age=0',
+                'Pragma' => 'no-cache',
+                'Expires' => '0'
+            ]);
+        }
+
+        $svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+            <rect width="1280" height="720" fill="#0f172a"/>
+            <rect x="30" y="30" width="1220" height="660" fill="none" stroke="#ef4444" stroke-width="2"/>
+            <circle cx="640" cy="280" r="45" fill="#1e293b" stroke="#ef4444" stroke-width="3"/>
+            <line x1="615" y1="255" x2="665" y2="305" stroke="#ef4444" stroke-width="4" stroke-linecap="round"/>
+            <text x="640" y="380" font-family="monospace, sans-serif" font-size="28" font-weight="bold" fill="#ef4444" text-anchor="middle">CAMERA OFFLINE</text>
+            <text x="640" y="420" font-family="monospace, sans-serif" font-size="18" font-weight="bold" fill="#f1f5f9" text-anchor="middle">NO SIGNAL - OID: ' . htmlspecialchars($oidStr) . '</text>
+            <text x="640" y="460" font-family="monospace, sans-serif" font-size="14" fill="#94a3b8" text-anchor="middle">Sinyal terputus atau frame usang (&gt; 10 detik)</text>
+        </svg>';
+
+        return response($svg, 200, [
+            'Content-Type' => 'image/svg+xml',
+            'Cache-Control' => 'no-cache, no-store, must-revalidate, max-age=0',
+            'Pragma' => 'no-cache',
+            'Expires' => '0'
+        ]);
+    }
+
+    /**
+     * Endpoint: GET /cctv/stream_{oid}.jpg
+     * Memeriksa keberadaan file dan waktu modifikasi < 10 detik.
+     * Jika tidak ada atau usang, tampilkan placeholder CAMERA OFFLINE untuk OID tersebut.
+     * Dilarang redirect ke kamera 1 atau kamera lain.
+     */
+    public function streamFrame($oid, Request $request)
+    {
+        $cleanOid = preg_replace('/[^a-zA-Z0-9_-]/', '', (string)$oid);
+        $frameFile0 = public_path("cctv/stream_{$cleanOid}.jpg");
+        $frameFile1 = storage_path("app/public/stream_{$cleanOid}.jpg");
+        $frameFile2 = storage_path("app/cctv_frame_{$cleanOid}.jpg");
 
         $targetFile = file_exists($frameFile0) ? $frameFile0 : (file_exists($frameFile1) ? $frameFile1 : (file_exists($frameFile2) ? $frameFile2 : null));
 
-        // Prioritas 1: Frame terbaru dari Edge Gateway (< 15 detik)
-        if ($targetFile && (time() - filemtime($targetFile)) < 15) {
+        if ($targetFile && (time() - filemtime($targetFile)) < 10) {
             return response()->file($targetFile, [
                 'Content-Type' => 'image/jpeg',
                 'Cache-Control' => 'no-cache, no-store, must-revalidate, max-age=0',
@@ -512,32 +572,111 @@ class CctvController extends Controller
             ]);
         }
 
-        // Prioritas 2: Jika server di lokal LAN, ambil langsung dari Agent DVR lokal port 8090
+        return $this->renderOfflinePlaceholder($cleanOid);
+    }
+
+    /**
+     * 7. GET /api/cctv-snapshot
+     * Menampilkan frame gambar langsung dari public/cctv/stream_{oid}.jpg atau storage
+     */
+    public function snapshot(Request $request)
+    {
+        $oid = $request->query('oid', 4);
+        $cleanOid = preg_replace('/[^a-zA-Z0-9_-]/', '', (string)$oid);
+
+        $frameFile0 = public_path("cctv/stream_{$cleanOid}.jpg");
+        $frameFile1 = storage_path("app/public/stream_{$cleanOid}.jpg");
+        $frameFile2 = storage_path("app/cctv_frame_{$cleanOid}.jpg");
+
+        $targetFile = file_exists($frameFile0) ? $frameFile0 : (file_exists($frameFile1) ? $frameFile1 : (file_exists($frameFile2) ? $frameFile2 : null));
+
+        // Prioritas 1: Frame terbaru dari Edge Gateway (< 10 detik)
+        if ($targetFile && (time() - filemtime($targetFile)) < 10) {
+            return response()->file($targetFile, [
+                'Content-Type' => 'image/jpeg',
+                'Cache-Control' => 'no-cache, no-store, must-revalidate, max-age=0',
+                'Pragma' => 'no-cache',
+                'Expires' => '0'
+            ]);
+        }
+
+        // Prioritas 2: Jika server di lokal LAN Windows, coba ambil dari Agent DVR lokal port 8090
+        if (in_array($request->getHost(), ['localhost', '127.0.0.1'])) {
+            try {
+                $res = Http::timeout(0.8)->get("http://localhost:8090/grab.jpg?oid={$cleanOid}");
+                if ($res->successful() && strlen($res->body()) > 2500) {
+                    return response($res->body(), 200, [
+                        'Content-Type' => 'image/jpeg',
+                        'Cache-Control' => 'no-cache, no-store, must-revalidate, max-age=0',
+                        'Pragma' => 'no-cache',
+                        'Expires' => '0'
+                    ]);
+                }
+            } catch (\Exception $e) {}
+        }
+
+        // Prioritas 3: Tampilkan gambar placeholder CAMERA OFFLINE untuk OID tersebut (Tanpa redirect)
+        return $this->renderOfflinePlaceholder($cleanOid);
+    }
+
+    /**
+     * Endpoint Sinkronisasi OID: POST /api/cctv-devices/{id}/update-oid atau /api/cctv-devices/update-oid
+     * Menerima OID resmi Agent DVR dari Edge Gateway dan menyimpannya ke database
+     */
+    public function updateOid(Request $request, $id = null)
+    {
+        $raw = json_decode($request->getContent(), true) ?: [];
+        $data = array_merge($request->all(), $raw);
+
+        $devId = $id ?: ($data['id'] ?? null);
+        $newOid = trim((string) ($data['oid'] ?? ($data['agent_oid'] ?? '')));
+
+        if (empty($newOid)) {
+            return response()->json(['status' => 'error', 'message' => 'Parameter oid wajib diisi!'], 400);
+        }
+
+        $device = null;
+        if ($devId) {
+            $device = CctvDevice::find($devId);
+        }
+
+        if (!$device && !empty($data['ip'])) {
+            $device = CctvDevice::where('ip_address', trim($data['ip']))->first();
+        }
+
+        if (!$device && !empty($data['name'])) {
+            $device = CctvDevice::where('name', trim($data['name']))->first();
+        }
+
+        if (!$device) {
+            return response()->json(['status' => 'error', 'message' => 'Device kamera tidak ditemukan untuk update OID!'], 404);
+        }
+
+        $oldOid = $device->oid;
+        $device->oid = $newOid;
+        $device->agent_oid = is_numeric($newOid) ? (int)$newOid : null;
+        $device->save();
+
+        // Jika ada tabel cameras lama, sinkronkan juga jika ada
         try {
-            $res = Http::timeout(0.8)->get("http://localhost:8090/grab.jpg?oid={$oid}");
-            if ($res->successful() && strlen($res->body()) > 100) {
-                return response($res->body(), 200, [
-                    'Content-Type' => 'image/jpeg',
-                    'Cache-Control' => 'no-cache, no-store, must-revalidate, max-age=0',
-                    'Pragma' => 'no-cache',
-                    'Expires' => '0'
-                ]);
+            if (\Illuminate\Support\Facades\Schema::hasTable('cameras')) {
+                \Illuminate\Support\Facades\DB::table('cameras')
+                    ->where('id', $device->id)
+                    ->orWhere('ip_address', $device->ip_address)
+                    ->update(['oid' => $newOid]);
             }
-        } catch (\Exception $e) {}
+        } catch (\Throwable $e) {}
 
-        // Prioritas 3: Standby Placeholder SVG
-        $svg = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
-            <rect width="640" height="360" fill="#020617"/>
-            <circle cx="320" cy="150" r="36" fill="#0f172a" stroke="#0ea5e9" stroke-width="2"/>
-            <path d="M308 142 L320 132 L332 142 M320 134 L320 168" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round"/>
-            <text x="320" y="215" font-family="monospace" font-size="13" font-weight="bold" fill="#38bdf8" text-anchor="middle">EDGE GATEWAY RELAY STANDBY</text>
-            <text x="320" y="240" font-family="monospace" font-size="11" fill="#64748b" text-anchor="middle">Menunggu sinyal video live dari Edge Gateway laptop (OID: ' . htmlspecialchars($oid) . ')...</text>
-            <text x="320" y="260" font-family="monospace" font-size="10" fill="#0ea5e9" text-anchor="middle">Jalankan: python edge_gateway.py</text>
-        </svg>';
-
-        return response($svg, 200, [
-            'Content-Type' => 'image/svg+xml',
-            'Cache-Control' => 'no-cache, no-store, must-revalidate'
+        return response()->json([
+            'status' => 'success',
+            'message' => "OID kamera '{$device->name}' berhasil diperbarui dari '{$oldOid}' menjadi '{$newOid}'",
+            'device' => [
+                'id' => $device->id,
+                'name' => $device->name,
+                'oid' => (string) $device->oid,
+                'agent_oid' => $device->agent_oid,
+                'ip_address' => $device->ip_address
+            ]
         ]);
     }
 

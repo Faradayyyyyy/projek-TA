@@ -32,6 +32,10 @@ Route::delete('/cctv-devices/{id}', [CctvController::class, 'destroy']);
 // 5. Uji Koneksi Kamera (TCP Socket Ping Test)
 Route::post('/cctv-devices/test', [CctvController::class, 'testConnection']);
 
+// 5b. Update OID Resmi dari Agent DVR
+Route::post('/cctv-devices/{id}/update-oid', [CctvController::class, 'updateOid']);
+Route::post('/cctv-devices/update-oid', [CctvController::class, 'updateOid']);
+
 // 6. Upload Frame Gambar dari Edge Gateway (Laptop) ke Cloud VPS
 Route::post('/cctv/upload-frame', [CctvController::class, 'uploadFrame']);
 

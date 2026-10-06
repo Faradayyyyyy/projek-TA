@@ -405,6 +405,9 @@ Route::post('/api/cctv/upload-frame', [App\Http\Controllers\CctvController::clas
 Route::get('/api/cctv-snapshot', [App\Http\Controllers\CctvController::class, 'snapshot']);
 Route::match(['get', 'post'], '/api/cctv-ptz/{command}', [App\Http\Controllers\CctvController::class, 'ptz']);
 Route::get('/api/cctv-power/{action}', [App\Http\Controllers\CctvController::class, 'power']);
+Route::get('/cctv/stream_{oid}.jpg', [App\Http\Controllers\CctvController::class, 'streamFrame']);
+Route::post('/api/cctv-devices/{id}/update-oid', [App\Http\Controllers\CctvController::class, 'updateOid']);
+Route::post('/api/cctv-devices/update-oid', [App\Http\Controllers\CctvController::class, 'updateOid']);
 Route::get('/api/hardware/poll', [App\Http\Controllers\CctvController::class, 'pollHardwareCommands']);
 Route::post('/api/hardware/control', [App\Http\Controllers\CctvController::class, 'controlHardware']);
 
