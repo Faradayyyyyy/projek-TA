@@ -323,19 +323,75 @@ class CctvController extends Controller
 
     /**
      * 4. DELETE /api/cctv-devices/{id}
-     * Hapus device kamera dari database
+     * Hapus device kamera dari database dan bersihkan cache stream frame
      */
     public function destroy($id)
     {
         $device = CctvDevice::find($id);
+        if (!$device) {
+            $device = CctvDevice::where('oid', $id)->first();
+        }
+
         if ($device) {
+            $deletedOid = (string) ($device->oid ?: $device->agent_oid);
+            $deletedName = $device->name;
+
+            // 1. Bersihkan file cache frame gambar stream_{oid}.jpg untuk OID yang dihapus
+            if (!empty($deletedOid)) {
+                $file1 = public_path("cctv/stream_{$deletedOid}.jpg");
+                $file2 = storage_path("app/public/stream_{$deletedOid}.jpg");
+                $file3 = storage_path("app/cctv_frame_{$deletedOid}.jpg");
+                if (file_exists($file1)) @unlink($file1);
+                if (file_exists($file2)) @unlink($file2);
+                if (file_exists($file3)) @unlink($file3);
+            }
+
+            // 2. Sinkronkan hapus di tabel cameras jika tabel tersebut ada
+            try {
+                if (\Illuminate\Support\Facades\Schema::hasTable('cameras')) {
+                    \Illuminate\Support\Facades\DB::table('cameras')
+                        ->where('id', $device->id)
+                        ->orWhere('oid', $deletedOid)
+                        ->delete();
+                }
+            } catch (\Throwable $e) {}
+
+            // 3. Hapus record kamera dari tabel cctv_devices
             $device->delete();
+
+            // 4. Update active_cctv_id jika kamera yang aktif sedang dihapus
+            $activeId = Cache::get('active_cctv_id');
+            if ($activeId == $id || $activeId == $device->id) {
+                $next = CctvDevice::where('is_active', true)->first();
+                Cache::put('active_cctv_id', $next ? $next->id : null, 86400);
+            }
+
+            // 5. Catat Log Aktivitas
+            try {
+                $logUser = auth()->user() ? auth()->user()->name : 'Admin';
+                $existingLogs = Cache::get('activity_logs', []);
+                array_unshift($existingLogs, [
+                    'time' => date('d/m/Y H:i:s'),
+                    'user' => $logUser,
+                    'action' => "Menghapus Device Kamera CCTV: {$deletedName} (OID {$deletedOid})",
+                    'device' => 'CCTV Manager Web',
+                    'param' => "OID: {$deletedOid}",
+                    'status' => 'DELETED'
+                ]);
+                Cache::put('activity_logs', array_slice($existingLogs, 0, 50), 86400);
+            } catch (\Throwable $e) {}
+
+            return response()->json([
+                'status' => 'success',
+                'message' => "Kamera '{$deletedName}' (OID {$deletedOid}) berhasil dihapus dari database!",
+                'deleted_oid' => $deletedOid
+            ]);
         }
 
         return response()->json([
-            'status' => 'success',
-            'message' => 'Kamera berhasil dihapus!'
-        ]);
+            'status' => 'error',
+            'message' => 'Kamera tidak ditemukan di database!'
+        ], 404);
     }
 
     /**

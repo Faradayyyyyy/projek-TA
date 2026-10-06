@@ -592,6 +592,98 @@ def ensure_camera_registered_in_agent_dvr(vps_url, cam, session):
 
     return current_oid or "4"
 
+def sync_and_purge_deleted_cameras(vps_url, active_cams, session, workers_dict=None):
+    """
+    Sinkronisasi penghapusan kamera antara database Laravel dan Agent DVR:
+    1. Membaca daftar OID aktif dari API Laravel.
+    2. Mengambil seluruh kamera aktif di Agent DVR via HTTP API (cmd=getobjects).
+    3. Jika ada kamera di Agent DVR yang sudah TIDAK TERDAFTAR di Laravel (telah dihapus dari web),
+       kirim perintah HTTP API ke Agent DVR untuk menghapusnya:
+       - http://localhost:8090/q.json?cmd=delete&ot=2&oid={oid} (dan deleteobject)
+    4. Hentikan pemrosesan stream dan hapus file cache gambar stream_{oid}.jpg.
+    """
+    if not isinstance(active_cams, list):
+        return
+
+    laravel_active_oids = set()
+    for cam in active_cams:
+        c_oid = str(cam.get("oid") or "").strip()
+        if c_oid:
+            laravel_active_oids.add(c_oid)
+
+    # 1. Dapatkan daftar seluruh kamera di Agent DVR
+    agent_dvr_cams = {}
+    try:
+        r = session.get(f"{AGENT_DVR_BASE_URL}/q.json?cmd=getobjects", timeout=2.0)
+        if r.status_code == 200:
+            data = r.json()
+            for obj in data.get("objectList", []):
+                if obj.get("typeID") == 2:  # 2 = Camera di Agent DVR
+                    obj_id = str(obj.get("id"))
+                    obj_name = obj.get("name", f"Camera {obj_id}")
+                    agent_dvr_cams[obj_id] = obj_name
+    except Exception as e:
+        print(f"[!] Warning: Gagal membaca objek Agent DVR untuk sinkronisasi hapus: {e}")
+        return
+
+    # 2. Cari kamera Agent DVR yang sudah tidak terdaftar di database Laravel
+    for agent_oid, cam_name in agent_dvr_cams.items():
+        if agent_oid not in laravel_active_oids:
+            print(f"\n[>>> SINKRONISASI HAPUS KAMERA] Kamera '{cam_name}' (OID {agent_oid}) tidak terdaftar di database Laravel.")
+            print(f"[*] Mengirim perintah hapus ke Agent DVR: cmd=delete&ot=2&oid={agent_oid}")
+
+            # A. Kirim perintah HTTP API ke Agent DVR untuk menghapus device
+            try:
+                # Sesuai spesifikasi prompt: cmd=delete&ot=2&oid={oid}
+                session.get(f"{AGENT_DVR_BASE_URL}/q.json?cmd=delete&ot=2&oid={agent_oid}", timeout=2.0)
+                # Panggil juga deleteobject untuk kompatibilitas Agent DVR
+                session.get(f"{AGENT_DVR_BASE_URL}/q.json?cmd=deleteobject&ot=2&oid={agent_oid}", timeout=2.0)
+                print(f"[OK] Kamera '{cam_name}' (OID {agent_oid}) berhasil dihapus dari Agent DVR.")
+            except Exception as e:
+                print(f"[!] Gagal menghapus kamera dari Agent DVR: {e}")
+
+            # B. Hentikan pemrosesan stream worker jika sedang berjalan
+            if workers_dict and agent_oid in workers_dict:
+                try:
+                    workers_dict[agent_oid].stop()
+                    print(f"[OK] Worker streaming untuk OID {agent_oid} telah dihentikan.")
+                except Exception:
+                    pass
+
+            # Bersihkan dari cache frame memori terisolasi
+            with camera_frames_lock:
+                camera_frames.pop(agent_oid, None)
+
+            # C. Hapus file cache gambar stream_{oid}.jpg lokal
+            try:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                cache_paths = [
+                    os.path.join(base_dir, 'public', 'cctv', f'stream_{agent_oid}.jpg'),
+                    os.path.join(base_dir, 'storage', 'app', 'public', f'stream_{agent_oid}.jpg'),
+                    os.path.join(base_dir, 'storage', 'app', f'cctv_frame_{agent_oid}.jpg'),
+                ]
+                for cp in cache_paths:
+                    if os.path.exists(cp):
+                        try:
+                            os.remove(cp)
+                            print(f"[OK] File cache frame dihapus: {cp}")
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[!] Gagal menghapus file cache frame OID {agent_oid}: {e}")
+
+            # D. Hapus juga dari storage/app/cctv_devices.json lokal
+            try:
+                cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'storage', 'app', 'cctv_devices.json')
+                if os.path.exists(cfg_path):
+                    with open(cfg_path, 'r', encoding='utf-8') as f:
+                        devs = json.load(f)
+                    filtered = [d for d in devs if str(d.get('oid')) != agent_oid]
+                    with open(cfg_path, 'w', encoding='utf-8') as f:
+                        json.dump(filtered, f, indent=2)
+            except Exception:
+                pass
+
 class CameraStreamManager:
     """Mengelola seluruh instance CameraStreamWorker secara dinamis dan concurrency multi-kamera."""
     def __init__(self, vps_url, session):
@@ -603,6 +695,9 @@ class CameraStreamManager:
     def update_cameras(self, camera_list):
         """Memperbarui daftar kamera aktif dan memastikan setiap OID memiliki thread independen."""
         with self.lock:
+            # 1. Jalankan sinkronisasi hapus kamera terhadap Agent DVR dan cache frame
+            sync_and_purge_deleted_cameras(self.vps_url, camera_list, self.session, self.workers)
+
             active_oids = set()
             for cam in camera_list:
                 # Pastikan kamera terdaftar di Agent DVR dan OID tersinkronisasi
@@ -653,7 +748,7 @@ def run_gateway(vps_url):
     poller_thread = threading.Thread(target=hardware_poll_worker, args=(poll_url, session), daemon=True)
     poller_thread.start()
 
-    # Loop utama: supervisor sinkronisasi daftar kamera setiap 15 detik
+    # Loop utama: supervisor sinkronisasi daftar kamera setiap 8 detik
     while True:
         try:
             # Ambil daftar seluruh kamera aktif dari VPS
@@ -683,7 +778,7 @@ def run_gateway(vps_url):
                 for cam in active_cams:
                     sync_active_camera(cam)
 
-            time.sleep(15)
+            time.sleep(8)
 
         except KeyboardInterrupt:
             print("\n[*] Edge Gateway dihentikan oleh pengguna.")
