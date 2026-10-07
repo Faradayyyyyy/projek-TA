@@ -673,6 +673,13 @@
                     </div>
 
                     <!-- OID Agent DVR (Opsional) -->
+                    <div class="space-y-1.5 sm:col-span-2">
+                        <label class="text-xs font-mono text-slate-300 font-bold flex items-center gap-1.5">
+                            <i data-lucide="layers" class="w-3.5 h-3.5 text-cyan-400"></i> Object ID (OID Agent DVR)
+                        </label>
+                        <input type="text" id="add-cam-oid" placeholder="Otomatis (atau isi nomor OID Agent DVR jika ada)"
+                               class="w-full bg-slate-900/90 text-white text-xs font-mono px-4 py-2.5 rounded-xl border border-white/10 focus:border-cyan-500 focus:outline-none">
+                    </div>
                 </div>
 
                 <!-- Hasil Uji Koneksi -->
