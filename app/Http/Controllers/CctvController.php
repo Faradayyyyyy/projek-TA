@@ -73,7 +73,7 @@ class CctvController extends Controller
         foreach ($commands as $cmd) {
             if (!is_array($cmd)) continue;
             $type = $cmd['type'] ?? 'ptz';
-            $oid = (string) ($cmd['oid'] ?? '4');
+            $oid = (string) ($cmd['oid'] ?? '1');
             $action = (string) ($cmd['action'] ?? ($cmd['command'] ?? ''));
 
             $formatted[] = [
@@ -100,25 +100,38 @@ class CctvController extends Controller
 
         // Fallback jika belum ada data di database
         if ($devices->isEmpty()) {
-            $default = CctvDevice::create([
-                'name' => 'Kamera 4 (Tapo C200 Lab 2)',
-                'ip_address' => '10.32.72.177',
-                'oid' => '4',
-                'agent_oid' => 4,
+            $cam1 = CctvDevice::create([
+                'name' => 'Kamera 1',
+                'ip_address' => '192.168.1.150',
+                'oid' => '1',
+                'agent_oid' => 1,
                 'rtsp_port' => 554,
                 'onvif_port' => 2020,
                 'username' => 'faradays',
                 'password' => '12345678',
                 'stream_path' => '/stream2',
                 'is_active' => true,
-                'description' => 'Kamera Utama Lab Otomasi 2'
+                'description' => 'Kamera 1 - Tapo C200'
             ]);
-            $devices = collect([$default]);
+            $cam2 = CctvDevice::create([
+                'name' => 'Kamera 2',
+                'ip_address' => '192.168.1.105',
+                'oid' => '2',
+                'agent_oid' => 2,
+                'rtsp_port' => 554,
+                'onvif_port' => 2020,
+                'username' => 'faradays',
+                'password' => '12345678',
+                'stream_path' => '/stream2',
+                'is_active' => true,
+                'description' => 'Kamera 2 - Tapo C200'
+            ]);
+            $devices = collect([$cam1, $cam2]);
         }
 
         // Format respon menjadi array objek sesuai spesifikasi
         $data = $devices->map(function ($dev) {
-            $oid = (string) ($dev->oid ?: $dev->agent_oid ?: '4');
+            $oid = (string) ($dev->oid ?: $dev->agent_oid ?: '1');
             $ip = (string) $dev->ip_address;
             $rtspPort = (int) ($dev->rtsp_port ?: 554);
             $onvifPort = (int) ($dev->onvif_port ?: 2020);
@@ -743,7 +756,7 @@ class CctvController extends Controller
     public function ptz($command, Request $request)
     {
         $raw = $request->json()->all() ?: ($request->all() ?: (json_decode($request->getContent(), true) ?: []));
-        $oid = (string) ($raw['oid'] ?? ($request->query('oid') ?? ($request->input('oid', '4'))));
+        $oid = (string) ($raw['oid'] ?? ($request->query('oid') ?? ($request->input('oid', '1'))));
         $action = strtolower($raw['action'] ?? $command);
 
         $allowed = ['up', 'down', 'left', 'right', 'home', 'center', 'zoomin', 'zoomout'];
@@ -783,7 +796,7 @@ class CctvController extends Controller
 
             try {
                 $pyPath = base_path('tapo_move.py');
-                if (file_exists($pyPath) && in_array($oid, ['4', '5'])) {
+                if (file_exists($pyPath) && in_array($oid, ['1', '2'])) {
                     $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($action) . " " . escapeshellarg($oid);
                     pclose(popen("start /B " . $cmdExec, "r"));
                 }
@@ -806,7 +819,7 @@ class CctvController extends Controller
      */
     public function power($action, Request $request)
     {
-        $oid = (string) ($request->query('oid') ?? ($request->input('oid', '4')));
+        $oid = (string) ($request->query('oid') ?? ($request->input('oid', '1')));
         $isOn = ($action === 'on');
         $agentCmd = $isOn ? 'switchon' : 'switchoff';
 
@@ -857,7 +870,7 @@ class CctvController extends Controller
         $raw = $request->json()->all() ?: ($request->all() ?: (json_decode($request->getContent(), true) ?: []));
 
         $type = $raw['type'] ?? 'ptz';
-        $oid = (string) ($raw['oid'] ?? ($request->query('oid', '4')));
+        $oid = (string) ($raw['oid'] ?? ($request->query('oid', '1')));
         $action = strtolower((string) ($raw['action'] ?? ($raw['command'] ?? ($raw['ptz'] ?? ''))));
 
         if ($type === 'ptz') {
@@ -896,7 +909,7 @@ class CctvController extends Controller
 
                 try {
                     $pyPath = base_path('tapo_move.py');
-                    if (file_exists($pyPath) && in_array($oid, ['4', '5'])) {
+                    if (file_exists($pyPath) && in_array($oid, ['1', '2'])) {
                         $cmdExec = "python \"" . $pyPath . "\" " . escapeshellarg($action) . " " . escapeshellarg($oid);
                         pclose(popen("start /B " . $cmdExec, "r"));
                     }

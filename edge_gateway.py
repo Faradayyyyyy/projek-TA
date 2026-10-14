@@ -31,6 +31,37 @@ MQTT_BROKER_PORT = 1883
 mqtt_client = mqtt.Client(client_id="EdgeGateway_Laptop")
 
 # =========================================================================
+# PEMETAAN 2 KAMERA SECARA PRESISI (HANYA OID 1 & OID 2)
+# =========================================================================
+# OID 1 = 192.168.1.150 (Kamera 1)
+# OID 2 = 192.168.1.105 (Kamera 2)
+# Hapus semua mapping OID lain (seperti OID 3, 4, atau 5)
+CAMERA_MAPPING = {
+    "1": {
+        "id": 1,
+        "oid": "1",
+        "name": "Kamera 1",
+        "ip": "192.168.1.150",
+        "port": 2020,
+        "rtsp_port": 554,
+        "user": "faradays",
+        "pass": "12345678",
+        "stream_path": "/stream2"
+    },
+    "2": {
+        "id": 2,
+        "oid": "2",
+        "name": "Kamera 2",
+        "ip": "192.168.1.105",
+        "port": 2020,
+        "rtsp_port": 554,
+        "user": "faradays",
+        "pass": "12345678",
+        "stream_path": "/stream2"
+    }
+}
+
+# =========================================================================
 # ISOLASI FRAME PER KAMERA (DICTIONARY camera_frames[oid])
 # DILARANG MENGGUNAKAN VARIABEL FRAME GLOBAL TUNGGAL ATAU MEMAKAI FRAME KAMERA LAIN
 # =========================================================================
@@ -51,12 +82,78 @@ def get_camera_frame(oid):
     with camera_frames_lock:
         return camera_frames.get(str(oid))
 
-def init_mqtt_background():
-    """Menghubungkan MQTT Client dan menjalankannya di latar belakang."""
+def on_mqtt_connect(client, userdata, flags, rc):
+    """Callback saat MQTT Client terhubung."""
+    if rc == 0:
+        print("[*] MQTT Background Client terhubung ke broker.")
+        # Subscribe ke topik PTZ kamera dan kontrol perangkat
+        topics = [
+            ("lab/cctv/ptz", 0),
+            ("lab/cctv/+/ptz", 0),
+            ("lab/ptz", 0),
+            ("lab/cctv/control", 0),
+            ("lab/cctv/+/control", 0),
+            ("lab/hardware/control", 0)
+        ]
+        client.subscribe(topics)
+        print("[*] Berhasil subscribe topik MQTT: lab/cctv/ptz, lab/cctv/+/ptz, lab/ptz")
+    else:
+        print(f"[!] Gagal koneksi MQTT Broker (rc={rc})")
+
+def on_mqtt_message(client, userdata, msg):
+    """Menerima dan membaca request MQTT secara dinamis (mendukung OID 1 & OID 2)."""
     try:
+        topic = msg.topic
+        payload_str = msg.payload.decode('utf-8', errors='ignore').strip()
+        if not payload_str:
+            return
+
+        cmd_data = {}
+        if payload_str.startswith("{") and payload_str.endswith("}"):
+            try:
+                cmd_data = json.loads(payload_str)
+            except Exception:
+                cmd_data = {}
+
+        # 1. Ekstrak OID dari topik jika berformat 'lab/cctv/{oid}/ptz' atau 'lab/cctv/{oid}/control'
+        topic_oid = None
+        parts = topic.split('/')
+        if len(parts) >= 3 and parts[1] == 'cctv':
+            cand = parts[2]
+            if cand in ["1", "2"]:
+                topic_oid = cand
+
+        # 2. Ambil OID secara dinamis dari payload JSON atau dari path topik
+        target_oid = cmd_data.get("oid") or cmd_data.get("cam_id") or cmd_data.get("id") or topic_oid or "1"
+        target_oid = str(target_oid).strip()
+
+        # 3. Ambil Aksi PTZ atau Command
+        action = cmd_data.get("action") or cmd_data.get("command") or cmd_data.get("ptz") or payload_str
+        action = str(action).strip().lower()
+
+        cmd_type = cmd_data.get("type", "ptz")
+
+        if cmd_type in ["lamp1", "lamp2"]:
+            threading.Thread(target=execute_command_async, args=(cmd_data,), daemon=True).start()
+        else:
+            ptz_cmd = {
+                "type": "ptz",
+                "oid": target_oid,
+                "action": action
+            }
+            threading.Thread(target=execute_command_async, args=(ptz_cmd,), daemon=True).start()
+
+    except Exception as e:
+        print(f"[!] Error saat memproses pesan MQTT: {e}")
+
+def init_mqtt_background():
+    """Menghubungkan MQTT Client dan menjalankannya di latar belakang dengan callback listener."""
+    try:
+        mqtt_client.on_connect = on_mqtt_connect
+        mqtt_client.on_message = on_mqtt_message
         mqtt_client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=60)
         mqtt_client.loop_start() # Jalankan MQTT loop di background thread
-        print("[*] MQTT Background Client berhasil terhubung & aktif di latar belakang.")
+        print("[*] MQTT Background Client berhasil terhubung & mendengarkan pesan.")
     except Exception as e:
         print(f"[!] Gagal menghubungkan MQTT Background Client: {e}")
 
@@ -70,11 +167,13 @@ except Exception as e:
 
 def print_banner(vps_url):
     print("=" * 72)
-    print("   IOT EDGE GATEWAY (MULTI-CAMERA HD 720p) - LAB OTOMASI 2")
+    print("   IOT EDGE GATEWAY (2-CAMERA SETUP: OID 1 & OID 2) - LAB OTOMASI")
     print("   Streaming Multi-Threading Independen & Kontrol Hardware Instan")
     print("=" * 72)
     print(f"[*] Target VPS Server : {vps_url}")
     print(f"[*] Local Agent DVR   : {AGENT_DVR_BASE_URL}")
+    print(f"[*] Kamera 1 (OID 1)  : {CAMERA_MAPPING['1']['ip']}:{CAMERA_MAPPING['1']['port']}")
+    print(f"[*] Kamera 2 (OID 2)  : {CAMERA_MAPPING['2']['ip']}:{CAMERA_MAPPING['2']['port']}")
     print(f"[*] Target FPS        : {TARGET_FPS} FPS per kamera aktif")
     print(f"[*] Resolusi & JPEG   : {TARGET_RESOLUTION[0]}x{TARGET_RESOLUTION[1]} (Quality {JPEG_QUALITY}, optimize=True)")
     print(f"[*] MQTT Broker       : {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}")
@@ -195,56 +294,61 @@ def process_frame(raw_bytes, target_size=TARGET_RESOLUTION, quality=JPEG_QUALITY
         return raw_bytes
 
 def execute_command_async(cmd):
-    """Mengeksekusi perintah hardware (PTZ & Saklar Lampu) secara non-blocking dan aman."""
+    """Mengeksekusi perintah hardware (PTZ Kamera 1 & 2 serta Saklar Lampu) secara non-blocking dan presisi."""
     if not isinstance(cmd, dict):
         return
 
-    cmd_type = cmd.get("type")
+    cmd_type = cmd.get("type", "ptz")
     
     if cmd_type == "ptz":
         try:
-            target_oid = cmd.get("oid")
-            action = cmd.get("action")
+            # 1. Ekstrak parameter OID secara dinamis dari request MQTT / HTTP
+            raw_oid = cmd.get("oid")
+            if raw_oid is None or str(raw_oid).strip() == "":
+                raw_oid = cmd.get("cam_id") or cmd.get("id") or cmd.get("camera_id")
 
-            # Validasi variabel action: jika None atau string kosong, cetak log peringatan & return
+            target_oid_str = str(raw_oid if raw_oid is not None else "1").strip()
+
+            # 2. Ekstrak parameter action / arah gerak
+            action = cmd.get("action") or cmd.get("command") or cmd.get("ptz")
             if action is None or not str(action).strip():
-                print("[!] Perintah PTZ diabaikan: parameter action kosong atau None.")
+                print(f"[!] [PTZ ERROR] Perintah diabaikan: parameter action kosong atau None (OID: {target_oid_str}).")
                 return
 
             action = str(action).strip().lower()
-            target_oid_str = str(target_oid or "").strip()
 
-            # Default ke OID 4 jika target_oid tidak diberikan
-            if not target_oid_str:
-                target_oid_str = "4"
+            # 3. Abaikan OID lawas yang sudah dihapus (OID 3, 4, 5)
+            if target_oid_str in ["3", "4", "5"]:
+                print(f"[!] [PTZ WARNING] OID {target_oid_str} sudah dinonaktifkan (hanya mendukung Kamera 1/OID 1 dan Kamera 2/OID 2). Perintah diabaikan.")
+                return
 
-            # 1. Jika target_oid adalah Kamera Tapo (OID 4): panggil tapo_move.move_tapo(action, target_oid="4")
-            if target_oid_str == "4":
-                print(f"\n[>>> KONTROL INSTAN TAPO C200] Memutar Kamera PTZ (OID {target_oid_str}) ke arah: {action.upper()}")
-                if has_ptz_driver:
-                    try:
-                        code, text = tapo_move.move_tapo(action, target_oid="4")
-                        print(f"[OK KONTROL SELESAI] Tapo PTZ {action.upper()} dieksekusi (Status {code})")
-                    except Exception as e:
-                        print(f"[!] Gagal menggerakkan kamera Tapo via tapo_move: {e}")
-                else:
-                    print("[!] Driver tapo_move tidak tersedia di gateway ini.")
+            # 4. Validasi OID harus terdaftar pada CAMERA_MAPPING (Hanya OID 1 dan OID 2)
+            if target_oid_str not in CAMERA_MAPPING:
+                print(f"[!] [PTZ WARNING] OID '{target_oid_str}' tidak valid! Mapping hanya tersedia untuk OID 1 (192.168.1.150) dan OID 2 (192.168.1.105).")
+                return
 
-            # 2. Jika target_oid adalah Kamera 1 - Lab Otomasi (OID 5 / ID 2): panggil tapo_move.move_tapo(action, target_oid="5")
-            elif target_oid_str in ["5", "1", "2"]:
-                print(f"\n[>>> KONTROL INSTAN TAPO C200] Memutar Kamera 1 PTZ (OID {target_oid_str}) ke arah: {action.upper()}")
-                if has_ptz_driver:
-                    try:
-                        code, text = tapo_move.move_tapo(action, target_oid="5")
-                        print(f"[OK KONTROL SELESAI] Kamera 1 PTZ {action.upper()} dieksekusi (Status {code})")
-                    except Exception as e:
-                        print(f"[!] Gagal menggerakkan Kamera 1 via tapo_move: {e}")
-                else:
-                    print("[!] Driver tapo_move tidak tersedia di gateway ini.")
+            cam_info = CAMERA_MAPPING[target_oid_str]
+            cam_name = cam_info["name"]
+            cam_ip = cam_info["ip"]
+            cam_port = cam_info.get("port", 2020)
 
-            # 3. Jika target_oid adalah Kamera Agent DVR lainnya:
-            # Kirim request PTZ ke HTTP API Agent DVR lokal
+            # 5. Pesan log/print di terminal mencetak nomor kamera, OID, IP, dan aksi secara presisi
+            print("\n" + "=" * 65)
+            print(f"[>>> KONTROL PTZ DINAMIS]")
+            print(f"    Target Kamera : {cam_name} (OID: {target_oid_str})")
+            print(f"    Alamat IP     : {cam_ip}:{cam_port}")
+            print(f"    Aksi / Arah   : {action.upper()}")
+            print("=" * 65)
+
+            # 6. Meneruskan variabel target_oid yang benar ke fungsi tapo_move.move_tapo(action, target_oid)
+            if has_ptz_driver:
+                try:
+                    code, text = tapo_move.move_tapo(action, target_oid=target_oid_str)
+                    print(f"[OK KONTROL SELESAI] {cam_name} (OID {target_oid_str}) -> Aksi {action.upper()} dieksekusi (Status {code})")
+                except Exception as e:
+                    print(f"[!] Gagal menggerakkan {cam_name} (OID {target_oid_str}) via tapo_move: {e}")
             else:
+                # Fallback ke Agent DVR lokal jika driver tapo_move tidak tersedia
                 ispy_map = {
                     'up': 'ispydir_3',
                     'down': 'ispydir_7',
@@ -258,7 +362,7 @@ def execute_command_async(cmd):
                 }
                 action_code = ispy_map.get(action, f"ispydir_{action}" if not action.startswith("ispy") else action)
                 base_q = f"{AGENT_DVR_BASE_URL}/q.json"
-                print(f"\n[>>> KONTROL INSTAN AGENT DVR] Mengirim PTZ (OID {target_oid_str}, Action: {action.upper()}) -> {base_q}")
+                print(f"[*] Fallback Agent DVR lokal: OID {target_oid_str} -> {action_code}")
                 try:
                     if action in ['home', 'center']:
                         params = {
@@ -290,7 +394,7 @@ def execute_command_async(cmd):
                             'ot': 2
                         }
                         requests.get(base_q, params=params_stop, timeout=1.5)
-                    print(f"[OK KONTROL SELESAI] Agent DVR PTZ (OID {target_oid_str}) {action.upper()} terkirim (Status {r.status_code})")
+                    print(f"[OK KONTROL SELESAI] Agent DVR PTZ ({cam_name}, OID {target_oid_str}) {action.upper()} terkirim (Status {r.status_code})")
                 except Exception as e:
                     print(f"[!] Gagal mengirim PTZ ke Agent DVR lokal (OID {target_oid_str}): {e}")
 
@@ -366,10 +470,11 @@ class CameraStreamWorker:
     def __init__(self, vps_url, cam_info, session):
         self.vps_url = vps_url
         self.cam_info = cam_info
-        self.oid = str(cam_info.get("oid") or "4")
-        self.cam_id = str(cam_info.get("id") or "")
-        self.name = cam_info.get("name", f"Kamera {self.oid}")
-        self.ip = str(cam_info.get("ip") or cam_info.get("ip_address") or "")
+        self.oid = str(cam_info.get("oid") or "1")
+        self.cam_id = str(cam_info.get("id") or self.oid)
+        default_cfg = CAMERA_MAPPING.get(self.oid, {})
+        self.name = cam_info.get("name") or default_cfg.get("name", f"Kamera {self.oid}")
+        self.ip = str(cam_info.get("ip") or cam_info.get("ip_address") or default_cfg.get("ip", ""))
         self.session = session
 
         self.grab_url = f"{AGENT_DVR_BASE_URL}/grab.jpg?oid={self.oid}&size=1280x720"
@@ -516,7 +621,7 @@ def ensure_camera_registered_in_agent_dvr(vps_url, cam, session):
     tangkap OID resmi dari respons JSON, lalu update/sinkronkan OID baru ke Laravel VPS.
     """
     if not cam or not isinstance(cam, dict):
-        return str(cam.get("oid") or "4") if cam else "4"
+        return str(cam.get("oid") or "1") if cam else "1"
 
     cam_id = cam.get("id")
     ip = str(cam.get("ip") or cam.get("ip_address") or "").strip()
@@ -590,7 +695,7 @@ def ensure_camera_registered_in_agent_dvr(vps_url, cam, session):
         except Exception as e:
             print(f"[!] Gagal mendaftarkan kamera ke Agent DVR: {e}")
 
-    return current_oid or "4"
+    return current_oid or "1"
 
 def sync_and_purge_deleted_cameras(vps_url, active_cams, session, workers_dict=None):
     """
@@ -765,12 +870,23 @@ def run_gateway(vps_url):
             except Exception:
                 pass
 
-            # Fallback jika belum berhasil mengambil dari API VPS
+            # Filter presisi: hanya kamera OID 1 dan OID 2 yang diizinkan aktif
+            filtered_cams = []
+            for cam in active_cams:
+                c_oid = str(cam.get("oid") or cam.get("id") or "").strip()
+                if c_oid in CAMERA_MAPPING:
+                    # Pastikan IP dan kredensial terisi presisi dari mapping jika kosong
+                    if not cam.get("ip"):
+                        cam["ip"] = CAMERA_MAPPING[c_oid]["ip"]
+                    cam["oid"] = c_oid
+                    filtered_cams.append(cam)
+            active_cams = filtered_cams
+
+            # Fallback jika belum berhasil mengambil dari API VPS: Gunakan HANYA OID 1 dan OID 2
             if not active_cams and not manager.workers:
-                # Coba baca dari file lokal atau default ke OID 4 dan OID 5
                 active_cams = [
-                    {"id": 1, "name": "Kamera 4 (Tapo C200 Lab 2)", "oid": "4"},
-                    {"id": 2, "name": "kamera 1 - lab otomasi", "oid": "5"}
+                    dict(CAMERA_MAPPING["1"]),
+                    dict(CAMERA_MAPPING["2"])
                 ]
 
             if active_cams:

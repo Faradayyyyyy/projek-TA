@@ -8,29 +8,29 @@ from datetime import datetime, timezone
 import requests
 
 # =========================================================================
-# KONFIGURASI KAMERA TAPO C200 (ONVIF)
+# KONFIGURASI KAMERA TAPO C200 (ONVIF) - 2 KAMERA (OID 1 & OID 2)
 # =========================================================================
-IP = "10.32.72.177"
+IP = "192.168.1.150"
 PORT = 2020
 USER = "faradays"
 PASS = "12345678"
 PROFILE_TOKEN = "profile_1"
 
-# Mapping konfigurasi kamera Tapo / ONVIF per OID (Pertahankan Kamera 4 & dukung Kamera 1)
+# Mapping konfigurasi kamera Tapo / ONVIF per OID (Hanya OID 1 & OID 2)
 CAMERA_DEFAULTS = {
-    "4": {
-        "ip": "10.32.72.177",
+    "1": {
+        "ip": "192.168.1.150",
         "port": 2020,
         "user": "faradays",
         "pass": "12345678",
-        "name": "kamera 2"
+        "name": "Kamera 1"
     },
-    "5": {
-        "ip": "10.32.72.68",
+    "2": {
+        "ip": "192.168.1.105",
         "port": 2020,
-        "user": "viggos",
+        "user": "faradays",
         "pass": "12345678",
-        "name": "Kamera 1 - Mesin Air Blast"
+        "name": "Kamera 2"
     }
 }
 
@@ -41,28 +41,21 @@ def safe_print(*args, **kwargs):
     except Exception:
         pass
 
-def load_config(target_oid="4"):
+def load_config(target_oid="1"):
     global IP, PORT, USER, PASS
-    oid_str = str(target_oid or "4").strip()
+    oid_str = str(target_oid or "1").strip()
     
-    # 0. Set default berdasarkan OID yang diminta
-    cfg = CAMERA_DEFAULTS.get(oid_str)
-    if not cfg:
-        # Fallback jika cam_id 1 atau 2 dikirim
-        if oid_str in ["1", "5"]:
-            cfg = CAMERA_DEFAULTS["5"]
-            oid_str = "5"
-        else:
-            cfg = CAMERA_DEFAULTS["4"]
-            oid_str = "4"
+    # 0. Set konfigurasi presisi berdasarkan OID yang diminta (Hanya 1 dan 2)
+    if oid_str not in CAMERA_DEFAULTS:
+        oid_str = "1"
             
+    cfg = CAMERA_DEFAULTS[oid_str]
     IP = cfg["ip"]
     PORT = cfg["port"]
     USER = cfg["user"]
     PASS = cfg["pass"]
 
-    # 1. Coba baca IP dari live configuration Agent DVR jika ada
-    found_in_objects = False
+    # 1. Coba baca kredensial dari live configuration Agent DVR untuk IP bersangkutan
     try:
         agent_objects = r"C:\Program Files\Agent\Media\XML\objects.json"
         if os.path.exists(agent_objects):
@@ -71,49 +64,35 @@ def load_config(target_oid="4"):
                     with open(agent_objects, 'r', encoding=enc) as f:
                         dvr_data = json.load(f)
                         cameras = dvr_data.get('cameras', [])
-                        cam = next((c for c in cameras if str(c.get('id')) == oid_str or c.get('name') == cfg.get('name')), None)
+                        # Cari objek kamera yang IP-nya cocok dengan target kamera kita
+                        cam = next((c for c in cameras if cfg["ip"] in str(c.get('settings', {}).get('onvifident', ''))), None)
                         if cam and 'settings' in cam:
                             settings = cam['settings']
-                            onvifident = settings.get('onvifident', '')
-                            if '://' in onvifident:
-                                host_part = onvifident.split('://', 1)[1].split('/')[0]
-                                if ':' in host_part:
-                                    ip_cand, port_cand = host_part.split(':')
-                                    IP = ip_cand
-                                    PORT = int(port_cand)
-                                else:
-                                    IP = host_part
                             if settings.get('login'):
                                 USER = settings.get('login')
                             if settings.get('password'):
                                 PASS = settings.get('password')
-                            found_in_objects = True
                         break
                 except Exception:
                     continue
     except Exception:
         pass
 
-    # 2. Coba baca dari storage/app/cctv_devices.json jika belum ditemukan di objects.json
-    if not found_in_objects:
-        try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            cfg_path = os.path.join(script_dir, 'storage', 'app', 'cctv_devices.json')
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    devices = json.load(f)
-                    active = next((d for d in devices if str(d.get('oid')) == oid_str or str(d.get('id')) == oid_str), None)
-                    if active:
-                        if active.get('ip') and active.get('ip') != "10.32.72.78":
-                            IP = active.get('ip')
-                        if active.get('port'):
-                            PORT = int(active.get('port'))
-                        if active.get('user'):
-                            USER = active.get('user')
-                        if active.get('pass'):
-                            PASS = active.get('pass')
-        except Exception:
-            pass
+    # 2. Coba baca kredensial dari storage/app/cctv_devices.json jika ada
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cfg_path = os.path.join(script_dir, 'storage', 'app', 'cctv_devices.json')
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                devices = json.load(f)
+                active = next((d for d in devices if str(d.get('oid')) == oid_str or d.get('ip') == cfg["ip"]), None)
+                if active:
+                    if active.get('user'):
+                        USER = active.get('user')
+                    if active.get('pass'):
+                        PASS = active.get('pass')
+    except Exception:
+        pass
 
 def generate_wsse():
     created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -159,9 +138,10 @@ def send_soap(action, body_inner):
     except Exception as e:
         return 500, str(e)
 
-def move_tapo(direction, target_oid="4"):
+def move_tapo(direction, target_oid="1"):
     load_config(target_oid)
-    safe_print(f"[*] Mengirim PTZ '{direction}' ke {IP}:{PORT} (User: {USER}, OID: {target_oid})...")
+    cam_name = CAMERA_DEFAULTS.get(str(target_oid), {}).get("name", f"Kamera {target_oid}")
+    safe_print(f"[*] [PTZ MOVE] Mengirim '{direction.upper()}' ke {cam_name} (OID: {target_oid}, IP: {IP}:{PORT}, User: {USER})...")
     x = 0.0
     y = 0.0
     z = 0.0
@@ -215,11 +195,11 @@ def move_tapo(direction, target_oid="4"):
             ispy_map = {'up': 'ispydir_3', 'down': 'ispydir_7', 'left': 'ispydir_1', 'right': 'ispydir_5', 'home': 'home', 'stop': 'ispydir_11'}
             action_code = ispy_map.get(direction, direction)
             base_q = "http://localhost:8090/q.json"
-            fallback_oid = str(target_oid) if str(target_oid).isdigit() else "4"
+            fallback_oid = str(target_oid) if str(target_oid) in ["1", "2"] else "1"
             requests.get(base_q, params={'cmd': 'ptzcommand', 'field': 'ptz', 'value': action_code, 'command': action_code, 'oid': fallback_oid, 'ot': 2}, timeout=1.5)
             time.sleep(0.35)
             requests.get(base_q, params={'cmd': 'ptzcommand', 'field': 'ptz', 'value': 'ispydir_11', 'command': 'ispydir_11', 'oid': fallback_oid, 'ot': 2}, timeout=1.5)
-            safe_print(f"Fallback ke Agent DVR lokal berhasil untuk arah '{direction}' (OID {fallback_oid})")
+            safe_print(f"Fallback ke Agent DVR lokal berhasil untuk arah '{direction}' ({cam_name}, OID {fallback_oid})")
             return 200, "Agent DVR Fallback OK"
         except Exception as e_fb:
             safe_print(f"Agent DVR fallback gagal: {e_fb}")
@@ -232,7 +212,7 @@ def move_tapo(direction, target_oid="4"):
 
 if __name__ == "__main__":
     direction = sys.argv[1].lower() if len(sys.argv) > 1 else "right"
-    target_oid = "4"
+    target_oid = "1"
     if len(sys.argv) > 2 and sys.argv[2]:
         arg2 = sys.argv[2]
         if "." in arg2:
