@@ -317,17 +317,28 @@ def execute_command_async(cmd):
 
             action = str(action).strip().lower()
 
-            # 3. Abaikan OID lawas yang sudah dihapus (OID 3, 4, 5)
-            if target_oid_str in ["3", "4", "5"]:
-                print(f"[!] [PTZ WARNING] OID {target_oid_str} sudah dinonaktifkan (hanya mendukung Kamera 1/OID 1 dan Kamera 2/OID 2). Perintah diabaikan.")
+            # Ambil konfigurasi target kamera (dari mapping default atau dari storage/app/cctv_devices.json)
+            cam_info = CAMERA_MAPPING.get(target_oid_str)
+            if not cam_info:
+                try:
+                    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'storage', 'app', 'cctv_devices.json')
+                    if os.path.exists(cfg_path):
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            devs = json.load(f)
+                        matched = next((d for d in devs if str(d.get('oid')) == target_oid_str or str(d.get('id')) == target_oid_str), None)
+                        if matched:
+                            cam_info = {
+                                "name": matched.get("name", f"Kamera {target_oid_str}"),
+                                "ip": matched.get("ip") or matched.get("ip_address", ""),
+                                "port": matched.get("port") or matched.get("onvif_port", 2020)
+                            }
+                except Exception:
+                    pass
+
+            if not cam_info:
+                print(f"[!] [PTZ WARNING] OID '{target_oid_str}' tidak ditemukan di konfigurasi kamera aktif!")
                 return
 
-            # 4. Validasi OID harus terdaftar pada CAMERA_MAPPING (Hanya OID 1 dan OID 2)
-            if target_oid_str not in CAMERA_MAPPING:
-                print(f"[!] [PTZ WARNING] OID '{target_oid_str}' tidak valid! Mapping hanya tersedia untuk OID 1 (192.168.1.150) dan OID 2 (192.168.1.105).")
-                return
-
-            cam_info = CAMERA_MAPPING[target_oid_str]
             cam_name = cam_info["name"]
             cam_ip = cam_info["ip"]
             cam_port = cam_info.get("port", 2020)
@@ -870,16 +881,22 @@ def run_gateway(vps_url):
             except Exception:
                 pass
 
-            # Filter presisi: hanya kamera OID 1 dan OID 2 yang diizinkan aktif
+            # Terima semua kamera aktif dari database Laravel
             filtered_cams = []
             for cam in active_cams:
                 c_oid = str(cam.get("oid") or cam.get("id") or "").strip()
+                if not c_oid:
+                    continue
                 if c_oid in CAMERA_MAPPING:
                     # Pastikan IP dan kredensial terisi presisi dari mapping jika kosong
                     if not cam.get("ip"):
                         cam["ip"] = CAMERA_MAPPING[c_oid]["ip"]
-                    cam["oid"] = c_oid
-                    filtered_cams.append(cam)
+                    if not cam.get("user"):
+                        cam["user"] = CAMERA_MAPPING[c_oid]["user"]
+                    if not cam.get("pass"):
+                        cam["pass"] = CAMERA_MAPPING[c_oid]["pass"]
+                cam["oid"] = c_oid
+                filtered_cams.append(cam)
             active_cams = filtered_cams
 
             # Fallback jika belum berhasil mengambil dari API VPS: Gunakan HANYA OID 1 dan OID 2
