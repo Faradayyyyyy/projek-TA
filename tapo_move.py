@@ -10,25 +10,25 @@ import requests
 # =========================================================================
 # KONFIGURASI KAMERA TAPO C200 (ONVIF) - 2 KAMERA (OID 1 & OID 2)
 # =========================================================================
-IP = "192.168.1.150"
+IP = "192.168.1.101"
 PORT = 2020
-USER = "faradays"
+USER = "labotomasi"
 PASS = "12345678"
 PROFILE_TOKEN = "profile_1"
 
-# Mapping konfigurasi kamera Tapo / ONVIF per OID (Hanya OID 1 & OID 2)
+# Mapping konfigurasi presisi kamera Tapo / ONVIF per OID (Hanya OID 1 & OID 2)
 CAMERA_DEFAULTS = {
     "1": {
-        "ip": "192.168.1.150",
+        "ip": "192.168.1.101",
         "port": 2020,
-        "user": "faradays",
+        "user": "labotomasi",
         "pass": "12345678",
         "name": "Kamera 1"
     },
     "2": {
-        "ip": "192.168.1.105",
+        "ip": "192.168.1.102",
         "port": 2020,
-        "user": "faradays",
+        "user": "labcontrol",
         "pass": "12345678",
         "name": "Kamera 2"
     }
@@ -45,7 +45,7 @@ def load_config(target_oid="1"):
     global IP, PORT, USER, PASS
     oid_str = str(target_oid or "1").strip()
     
-    # 0. Set konfigurasi presisi berdasarkan OID yang diminta (Hanya 1 dan 2)
+    # 0. Set konfigurasi default presisi berdasarkan OID yang diminta (Hanya 1 dan 2)
     if oid_str not in CAMERA_DEFAULTS:
         oid_str = "1"
             
@@ -55,38 +55,21 @@ def load_config(target_oid="1"):
     USER = cfg["user"]
     PASS = cfg["pass"]
 
-    # 1. Coba baca kredensial dari live configuration Agent DVR untuk IP bersangkutan
-    try:
-        agent_objects = r"C:\Program Files\Agent\Media\XML\objects.json"
-        if os.path.exists(agent_objects):
-            for enc in ['utf-8-sig', 'utf-8']:
-                try:
-                    with open(agent_objects, 'r', encoding=enc) as f:
-                        dvr_data = json.load(f)
-                        cameras = dvr_data.get('cameras', [])
-                        # Cari objek kamera yang IP-nya cocok dengan target kamera kita
-                        cam = next((c for c in cameras if cfg["ip"] in str(c.get('settings', {}).get('onvifident', ''))), None)
-                        if cam and 'settings' in cam:
-                            settings = cam['settings']
-                            if settings.get('login'):
-                                USER = settings.get('login')
-                            if settings.get('password'):
-                                PASS = settings.get('password')
-                        break
-                except Exception:
-                    continue
-    except Exception:
-        pass
-
-    # 2. Coba baca kredensial dari storage/app/cctv_devices.json jika ada
+    # 1. Coba baca kredensial dari storage/app/cctv_devices.json jika ada
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         cfg_path = os.path.join(script_dir, 'storage', 'app', 'cctv_devices.json')
         if os.path.exists(cfg_path):
             with open(cfg_path, 'r', encoding='utf-8') as f:
                 devices = json.load(f)
-                active = next((d for d in devices if str(d.get('oid')) == oid_str or d.get('ip') == cfg["ip"]), None)
+                active = next((d for d in devices if str(d.get('oid')) == oid_str), None)
+                if not active:
+                    active = next((d for d in devices if str(d.get('id')) == oid_str), None)
                 if active:
+                    if active.get('ip'):
+                        IP = active.get('ip')
+                    if active.get('port'):
+                        PORT = int(active.get('port'))
                     if active.get('user'):
                         USER = active.get('user')
                     if active.get('pass'):

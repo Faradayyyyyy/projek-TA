@@ -33,18 +33,18 @@ mqtt_client = mqtt.Client(client_id="EdgeGateway_Laptop")
 # =========================================================================
 # PEMETAAN 2 KAMERA SECARA PRESISI (HANYA OID 1 & OID 2)
 # =========================================================================
-# OID 1 = 192.168.1.150 (Kamera 1)
-# OID 2 = 192.168.1.105 (Kamera 2)
+# OID 1 = 192.168.1.101 (Kamera 1)
+# OID 2 = 192.168.1.102 (Kamera 2)
 # Hapus semua mapping OID lain (seperti OID 3, 4, atau 5)
 CAMERA_MAPPING = {
     "1": {
         "id": 1,
         "oid": "1",
         "name": "Kamera 1",
-        "ip": "192.168.1.150",
+        "ip": "192.168.1.101",
         "port": 2020,
         "rtsp_port": 554,
-        "user": "faradays",
+        "user": "labotomasi",
         "pass": "12345678",
         "stream_path": "/stream2"
     },
@@ -52,10 +52,10 @@ CAMERA_MAPPING = {
         "id": 2,
         "oid": "2",
         "name": "Kamera 2",
-        "ip": "192.168.1.105",
+        "ip": "192.168.1.102",
         "port": 2020,
         "rtsp_port": 554,
-        "user": "faradays",
+        "user": "labcontrol",
         "pass": "12345678",
         "stream_path": "/stream2"
     }
